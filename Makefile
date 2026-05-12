@@ -2,7 +2,7 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -Wpedantic -std=c11 -D_DEFAULT_SOURCE
 INCLUDES = -Iinclude -Isrc/utils
-LIBS = -lpthread # Anche se usi thread C11, spesso serve linkare pthread su Linux
+LIBS = -lpthread 
 
 # Target della libreria 
 LIB_NAME = libmr.a
@@ -22,10 +22,10 @@ TEST_EXE = tests/test_suite
 
 # --- Target Principali ---
 
-# Target di default: compila tutto [cite: 481, 482]
+# Target di default: compila tutto 
 all: $(LIB_NAME) $(EXAMPLE_EXE)
 
-# Creazione della libreria statica [cite: 416, 473]
+# Creazione della libreria statica 
 $(LIB_NAME): $(OBJ_FILES)
 	ar rcs $@ $^
 
@@ -33,18 +33,18 @@ $(LIB_NAME): $(OBJ_FILES)
 %.o: %.c
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
-# Compilazione dell'esempio (linka la libreria appena creata) [cite: 368, 482]
+# Compilazione dell'esempio (linka la libreria appena creata) 
 $(EXAMPLE_EXE): $(EXAMPLE_SRC) $(LIB_NAME)
 	$(CC) $(CFLAGS) $(INCLUDES) $< -L. -lmr $(LIBS) -o $@
 
-# Target per i test automatici [cite: 419, 483]
+# Target per i test automatici
 test: $(TEST_EXE)
 	./$(TEST_EXE)
 
 $(TEST_EXE): $(TEST_SRC) $(LIB_NAME)
 	$(CC) $(CFLAGS) $(INCLUDES) $< -L. -lmr $(LIBS) -o $@
 
-# Pulizia dei file generati [cite: 484]
+# Pulizia dei file generati 
 clean:
 	rm -f $(OBJ_FILES) $(LIB_NAME) $(EXAMPLE_EXE) $(TEST_EXE) mr.log
 	rm -f tests/*.o examples/*.o

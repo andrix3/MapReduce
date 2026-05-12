@@ -16,44 +16,44 @@
  * Contiene lo stato necessario per gestire l'intera pipeline.
  */
 struct mr {
-    mr_attr_t attr;            // Copia degli attributi di configurazione [cite: 782]
-    mr_mapper_t user_mapper;   // Funzione mapper dell'utente [cite: 764]
-    mr_reducer_t user_reducer; // Funzione reducer dell'utente [cite: 765]
-    void *user_arg;            // Argomento utente da passare alle callback [cite: 766]
+    mr_attr_t attr;            // Copia degli attributi di configurazione 
+    mr_mapper_t user_mapper;   // Funzione mapper dell'utente 
+    mr_reducer_t user_reducer; // Funzione reducer dell'utente 
+    void *user_arg;            // Argomento utente da passare alle callback 
     
-    pid_t mapper_pid;          // PID del processo figlio mapper [cite: 207]
-    pid_t reducer_pid;         // PID del processo figlio reducer [cite: 231]
+    pid_t mapper_pid;          // PID del processo figlio mapper 
+    pid_t reducer_pid;         // PID del processo figlio reducer
     
-    // Descrittori delle pipe necessari al processo principale [cite: 254-256]
+    // Descrittori delle pipe necessari al processo principale 
     int main_to_mapper_write;
     int reducer_to_main_read;
 };
 
 /**
- * Header per il protocollo di comunicazione sulle pipe [cite: 336-340].
+ * Header per il protocollo di comunicazione sulle pipe 
  * Usato per trasmettere coppie (token, valore) e risultati finali.
  */
 typedef struct {
-    int token_len; // [cite: 334]
-    int value_len; // [cite: 343]
+    int token_len; 
+    int value_len; 
 } mr_pair_header_t;
 
 /* --- Prototipi di Funzioni Ausiliarie (Interne) --- */
 
-// Gestione letture e scritture parziali su pipe [cite: 350-352]
+// Gestione letture e scritture parziali su pipe 
 static ssize_t readn(int fd, void *buf, size_t n);
 static ssize_t writen(int fd, const void *buf, size_t n);
 
-// Funzioni principali eseguite dai processi figli [cite: 227, 250]
+// Funzioni principali eseguite dai processi figli 
 static void mapper_process_main(struct mr *mr, int pipe_in, int pipe_out);
 static void reducer_process_main(struct mr *mr, int pipe_in, int pipe_out);
 
-// Entry point per i thread C11 (mapper, reducer e lettori) [cite: 301-303]
+// Entry point per i thread C11 (mapper, reducer e lettori) 
 static int mapper_worker_main(void *arg);
 static int reducer_worker_main(void *arg);
 static int reader_main(void *arg);
 
-/* --- Implementazione Interfaccia Pubblica (Stubs) --- */
+/* --- Implementazione Interfaccia Pubblica --- */
 
 int mr_attr_init(mr_attr_t *attr) {
     if(!attr) return -1;
@@ -65,7 +65,7 @@ int mr_attr_init(mr_attr_t *attr) {
 }
 
 int mr_attr_set_mapper_threads(mr_attr_t *attr, size_t n) {
-    if (n == 0) return -1; // [cite: 779]
+    if (n == 0) return -1; 
     attr->mapper_threads = n;
     return 0;
 }
@@ -90,31 +90,31 @@ int mr_create(mr_t *mr, const mr_attr_t *attr, mr_mapper_t mapper, mr_reducer_t 
 }
 
 int mr_start(mr_t mr, const char *input_path, const char *output_path) {
-    // 1. Crea le 3 pipe [cite: 264]
-    // 2. Fork del processo mapper [cite: 265]
-    // 3. Fork del processo reducer [cite: 266]
-    // 4. Nel padre: invia righe al mapper e riceve risultati dal reducer [cite: 272-273]
-    // 5. Chiude i descrittori e attende i figli con waitpid() [cite: 274]
+    // 1. Crea le 3 pipe 
+    // 2. Fork del processo mapper
+    // 3. Fork del processo reducer
+    // 4. Nel padre: invia righe al mapper e riceve risultati dal reducer 
+    // 5. Chiude i descrittori e attende i figli con waitpid() 
     return 0;
 }
 
 int mr_destroy(mr_t mr) {
-    // Libera la memoria della struttura e risorse associate [cite: 786]
+    // Libera la memoria della struttura e risorse associate 
     return 0;
 }
 
 /* --- Implementazione Logica Interna (Placeholders) --- */
 
 static void mapper_process_main(struct mr *mr, int pipe_in, int pipe_out) {
-    // Inizializza code produttore-consumatore [cite: 305]
-    // Avvia thread lettore e thread worker C11 [cite: 271]
-    // Attende terminazione thread e chiude pipe verso il reducer [cite: 283, 289]
-    _exit(0); // [cite: 228]
+    // Inizializza code produttore-consumatore 
+    // Avvia thread lettore e thread worker C11
+    // Attende terminazione thread e chiude pipe verso il reducer 
+    _exit(0); 
 }
 
 static void reducer_process_main(struct mr *mr, int pipe_in, int pipe_out) {
-    // Legge coppie, raggruppa per token [cite: 322-323]
-    // Esegue thread reducer sui gruppi completi [cite: 325]
-    // Scrive risultati finali sulla pipe verso il main [cite: 326]
-    _exit(0); // [cite: 251]
+    // Legge coppie, raggruppa per token
+    // Esegue thread reducer sui gruppi completi
+    // Scrive risultati finali sulla pipe verso il main
+    _exit(0); 
 }
