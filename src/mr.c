@@ -1,3 +1,7 @@
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -6,6 +10,8 @@
 #include <threads.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
+#include <stdint.h>
+#include <dirent.h>
 
 #include "mr.h"
 #include "error_utils.h"
@@ -43,11 +49,10 @@ typedef struct
     int value_len;
 } mr_pair_header_t;
 
-/* --- Prototipi di Funzioni Ausiliarie (Interne) --- */
+/* --- Prototipi di Funzioni Ausiliarie --- */
 
-// Gestione letture e scritture parziali su pipe
-static ssize_t readn(int fd, void *buf, size_t n);
-static ssize_t writen(int fd, const void *buf, size_t n);
+static int process_single_file(mr_t mr, const char *path);
+static int process_multiple_files(mr_t mr, const char *path);
 
 // Funzioni principali eseguite dai processi figli
 static void mapper_process_main(struct mr *mr, int pipe_in, int pipe_out);
@@ -210,8 +215,7 @@ int mr_start(mr_t mr, const char *input_path, const char *output_path)
     pipe(pipe_main_to_mapper);
     pipe(pipe_mapper_to_reducer);
     pipe(pipe_reducer_to_main);
-    
-    
+
     if ((mr->mapper_pid = fork()) == 0)
     {
         // Sono nel processo mapper
@@ -221,14 +225,13 @@ int mr_start(mr_t mr, const char *input_path, const char *output_path)
         close(pipe_reducer_to_main[1]);
 
         mapper_process_main(mr, pipe_main_to_mapper[0], pipe_mapper_to_reducer[1]);
-        
+
         close(pipe_main_to_mapper[0]);
         close(pipe_mapper_to_reducer[1]);
-        
+
         _exit(EXIT_SUCCESS);
     }
-    
-    
+
     if ((mr->reducer_pid = fork()) == 0)
     {
         // Sono nel processo reducer
@@ -236,7 +239,7 @@ int mr_start(mr_t mr, const char *input_path, const char *output_path)
         close(pipe_main_to_mapper[1]);
         close(pipe_mapper_to_reducer[1]);
         close(pipe_reducer_to_main[0]);
-        
+
         reducer_process_main(mr, pipe_mapper_to_reducer[0], pipe_reducer_to_main[1]);
 
         close(pipe_mapper_to_reducer[0]);
@@ -244,26 +247,24 @@ int mr_start(mr_t mr, const char *input_path, const char *output_path)
 
         _exit(EXIT_SUCCESS);
     }
-    
+
     close(pipe_main_to_mapper[0]);
     close(pipe_mapper_to_reducer[0]);
     close(pipe_mapper_to_reducer[1]);
     close(pipe_reducer_to_main[1]);
-    
+
     mr->main_to_mapper_write = pipe_main_to_mapper[1];
     mr->reducer_to_main_read = pipe_reducer_to_main[0];
-    
+
     if (input_path_type == PATH_FILE)
     {
-        // Caso semplice: aggiungi il file alla lista dei lavori
-        // process_single_file(mr, input_path);
+        process_single_file(mr, input_path);
     }
     else if (input_path_type == PATH_DIRECTORY)
     {
-        // Caso complesso: usa scandir() per ottenere i file in ordine alfabetico
-        // e filtra solo i file regolari (S_ISREG)
+        process_multiple_files(mr, input_path);
     }
-    
+
     close(mr->main_to_mapper_write);
     mr->main_to_mapper_write = -1;
 
@@ -294,7 +295,8 @@ int mr_destroy(mr_t mr)
         close(mr->reducer_to_main_read);
     }
 
-    if (mr->attr.log_file) {
+    if (mr->attr.log_file)
+    {
         free((char *)mr->attr.log_file);
     }
 
@@ -304,14 +306,110 @@ int mr_destroy(mr_t mr)
     return 0;
 }
 
-/* --- Implementazione Logica Interna --- */
+/* --- Implementazione funzioni ausiliarie ---*/
+
+static int process_single_file(mr_t mr, const char *path)
+{
+    if (!mr || !path)
+    {
+        return -1;
+    }
+
+    FILE *fd = fopen(path, "r");
+    if (fd == NULL)
+    {
+        MR_LOG(mr, "ERROR", "Impossibile aprire il file di input");
+        return -1;
+    }
+
+    MR_LOG(mr, "INFO", "Inizio lettura file");
+
+    char *line = NULL;
+    size_t len = 0;
+    ssize_t nread;
+    uint32_t line_num = 1;
+    size_t path_len = strlen(path);
+
+    while ((nread = getline(&line, &len, fd)) != -1)
+    {
+        if (nread > 0 && line[nread - 1] == '\n')
+        {
+            line[nread - 1] = '\0';
+            nread--;
+        }
+
+        size_t line_len = (size_t)nread;
+
+        writen(mr->main_to_mapper_write, &path_len, sizeof(size_t));
+        writen(mr->main_to_mapper_write, path, path_len);
+        writen(mr->main_to_mapper_write, &line_num, sizeof(uint32_t));
+        writen(mr->main_to_mapper_write, &line_len, sizeof(size_t));
+        writen(mr->main_to_mapper_write, line, line_len);
+
+        line_num++;
+    }
+
+    MR_LOG(mr, "INFO", "Fine lettura file");
+
+    fclose(fd);
+
+    if (line)
+        free(line);
+
+    return 0;
+}
+
+static int process_multiple_files(mr_t mr, const char *path)
+{
+    struct dirent **namelist;
+    int n;
+
+    MR_LOG(mr, "INFO", "Inizio scansione directory di input per elaborazione multipla");
+
+    // Scansioniamo la directory. alphasort ordina i file in modo lessicografico (A-Z)
+    n = scandir(path, &namelist, NULL, alphasort);
+    if (n < 0) {
+        MR_LOG(mr, "ERROR", "Impossibile aprire o scansionare la directory di input");
+        return -1;
+    }
+
+    int status = 0;
+
+    // Iteriamo attraverso tutti i file trovati nella directory
+    for (int i = 0; i < n; i++) {
+        // Consideriamo solo i file regolari (ignoriamo cartelle annidate, link, ecc.)
+        if (namelist[i]->d_type == DT_REG) {
+            char full_path[4096]; // Dimensione di sicurezza standard per i path nei sistemi POSIX
+            
+            // Costruiamo il percorso completo: directory/nome_file
+            snprintf(full_path, sizeof(full_path), "%s/%s", path, namelist[i]->d_name);
+
+            // Passiamo il file singolo alla funzione che abbiamo già scritto
+            if (process_single_file(mr, full_path) != 0) {
+                MR_LOG(mr, "ERROR", "Errore durante l'elaborazione del file nella directory");
+                status = -1; // Tracciamo il fallimento ma continuiamo a liberare la memoria
+            }
+        }
+        
+        // Liberiamo la memoria della singola voce allocata da scandir
+        free(namelist[i]);
+    }
+    
+    // Liberiamo l'array di puntatori principale
+    free(namelist);
+
+    if (status == 0) {
+        MR_LOG(mr, "INFO", "Elaborazione della directory completata con successo");
+    }
+
+    return status;
+}
 
 static void mapper_process_main(struct mr *mr, int pipe_in, int pipe_out)
 {
     // Inizializza code produttore-consumatore
     // Avvia thread lettore e thread worker C11
     // Attende terminazione thread e chiude pipe verso il reducer
-
 }
 
 static void reducer_process_main(struct mr *mr, int pipe_in, int pipe_out)
@@ -319,5 +417,4 @@ static void reducer_process_main(struct mr *mr, int pipe_in, int pipe_out)
     // Legge coppie, raggruppa per token
     // Esegue thread reducer sui gruppi completi
     // Scrive risultati finali sulla pipe verso il main
-
 }

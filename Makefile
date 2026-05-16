@@ -1,6 +1,6 @@
 # Variabili di compilazione
 CC = gcc
-CFLAGS = -Wall -Wextra -Wpedantic -std=c11 -D_DEFAULT_SOURCE
+CFLAGS = -Wall -Wextra -Wpedantic -std=c11 -D_DEFAULT_SOURCE -pthread
 INCLUDES = -Iinclude -Isrc/utils
 LIBS = -lpthread 
 
@@ -23,7 +23,7 @@ TEST_EXE = tests/test_suite
 # --- Target Principali ---
 
 # Target di default: compila tutto 
-all: $(LIB_NAME) $(EXAMPLE_EXE)
+all: $(LIB_NAME) $(EXAMPLE_EXE) $(TEST_EXE)
 
 # Creazione della libreria statica 
 $(LIB_NAME): $(OBJ_FILES)

@@ -1,13 +1,60 @@
 #include <sys/stat.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
+#include <libgen.h>
+#include <errno.h>
+
 #include "utils.h"
+
+ssize_t writen(int fd, const void *buf, size_t n) {
+    size_t nleft = n;
+    ssize_t nwritten;
+    const char *ptr = buf;
+
+    while (nleft > 0) {
+        if ((nwritten = write(fd, ptr, nleft)) <= 0) {
+            if (nwritten < 0 && errno == EINTR)
+                nwritten = 0;   /* and call write() again */
+            else
+                return -1;      /* error */
+        }
+        nleft -= nwritten;
+        ptr += nwritten;
+    }
+    return n;
+}
+
+ssize_t readn(int fd, void *buf, size_t n) {
+    size_t nleft = n;
+    ssize_t nread;
+    char *ptr = buf;
+
+    while (nleft > 0) {
+        if ((nread = read(fd, ptr, nleft)) < 0) {
+            if (errno == EINTR)
+                nread = 0;      /* and call read() again */
+            else
+                return -1;
+        } else if (nread == 0)
+            break;              /* EOF */
+
+        nleft -= nread;
+        ptr += nread;
+    }
+    return n - nleft;         /* return >= 0 */
+}
 #include "log_internal.h"
 
 /** 
  * controllo validità path
- * return -1 PATH_INVALID
- * retunr 0 PATH_FILE
- * return 1 PATH_DIRECTORY 
+ * return: 
+ * PATH_INVALID: -1
+ * PATH_FILE: 0
+ * PATH_DIRECTORY: 1
 */
 path_type_t check_path(const char * path) {
     struct stat s;
