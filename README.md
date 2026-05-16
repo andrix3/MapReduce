@@ -38,8 +38,20 @@ L'utilizzo del framework MapReduce tramite l'API copre generalmente quattro macr
 
 ---
 
-## 📌 TODO (Stato corrente)
+# Prossimi step 
 
-- [ ] Da ultimare la gestione ed ottimizzazione i log (salvataggio concorrente senza collissioni, formattazione log in `log_internal.c`).
-- [ ] Implementazione e controllo accurato sulle invocazioni delle chiamate di sistema in `mr.c` (`malloc`, `fork`, status delle pipe e code).
-- [ ] Da formalizzare ed integrare in lettura/scrittura il protocollo di scambio dati sulle pipe (strutture `mr_pair_header_t`, passaggio Token-Payload sulle 3 pipe logiche create).
+1. Rendere coerenti logging + error utils
+2. implementare mr_log_internal() (almeno append su file con timestamp + pid/tid).
+3. sostituire mr_log_error_internal con mr_log_internal o aggiungere wrapper reale.
+4. Definire protocollo pipe
+5. header unico per messaggio + tipo messaggio (LINE, PAIR, RESULT, EOF).
+6. Implementare mapper_process_main
+7. reader thread legge LINE da pipe main
+queue bounded (attr.queue_size)
+8. N worker thread chiamano user_mapper e scrivono PAIR su pipe verso reducer
+9. Implementare reducer_process_main
+10. accumulo per token (hash map) + quando finito input, esegue reduce e invia RESULT
+11. Implementare output su mr_start
+12. scrivere su output_path (chiarire se directory o file unico).
+13. Test veri
+14. un test che lancia wordcount su input piccolo e verifica output.
