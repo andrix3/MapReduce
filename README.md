@@ -40,18 +40,48 @@ L'utilizzo del framework MapReduce tramite l'API copre generalmente quattro macr
 
 # Prossimi step 
 
-1. Rendere coerenti logging + error utils
-2. implementare mr_log_internal() (almeno append su file con timestamp + pid/tid).
-3. sostituire mr_log_error_internal con mr_log_internal o aggiungere wrapper reale.
-4. Definire protocollo pipe
-5. header unico per messaggio + tipo messaggio (LINE, PAIR, RESULT, EOF).
-6. Implementare mapper_process_main
-7. reader thread legge LINE da pipe main
-queue bounded (attr.queue_size)
-8. N worker thread chiamano user_mapper e scrivono PAIR su pipe verso reducer
-9. Implementare reducer_process_main
-10. accumulo per token (hash map) + quando finito input, esegue reduce e invia RESULT
-11. Implementare output su mr_start
-12. scrivere su output_path (chiarire se directory o file unico).
-13. Test veri
-14. un test che lancia wordcount su input piccolo e verifica output.
+Alla luce delle specifiche contenute in Testo.pdf, questa è la TODO list aggiornata per completare il progetto in accordo con i requisiti:
+
+1. **Gestione del Logging Condiviso**:
+   - Implementare la scrittura su file di log (es: `mr.log`) rispettando ESATTAMENTE il formato richiesto: `[timestamp] [processo] [thread] [evento] messaggio`.
+   - Sincronizzare gli accessi al log (es. tramite semafori POSIX) poiché più processi/thread scriveranno in modo concorrente sullo stesso file.
+   - Registrare tutti gli eventi richiesti: creazione pipe e processi, thread C11, chiusura stream, righe lette, token aggregati, ecc.
+
+2. **Protocollo Interno Pipe (Rimozione `size_t` cross-arch)**:
+   - Modificare le chiamate sulle syscall `readn` e `writen` in modo che la dimensione dell'header (es. token length o result length) venga gestita tramite tipi `int` (controllando che non siano negativi!) come da PDF, e non `size_t`. 
+   - Rimuovere il concetto di un messaggio speciale "EOF". La fine del flusso deve essere gestita esclusivamente intercettando lo _0_ (EOF) della `read` causato da una `close()` del lato di scrittura della file descriptor remota.
+   - Non assumerne alcun invio esplicito del `'\0'` al reducer/mapper poiché non fa parte dei field originali di `mr_value_t`.
+
+3. **Logica Processo Mapper (`mapper_process_main`)**:
+   - Avviare il thread lettore che incoda righe disgiunte nella bounded-queue interna `mtx_t` / `cnd_t` (grande al più `attr.queue_size`).
+   - Lanciare `N` thread worker C11 (da config `mapper_threads`) che leggono riga e lanciano la funzione user `mapper`. 
+   - I worker scrivono, in mutua esclusione, il dato struct `pair` formattato nel buffer pipe diretto a Reducer.
+
+4. **Logica Processo Reducer (`reducer_process_main`)**:
+   - Implementare Thread lettore da `mapper_to_reducer` reader-side per riempire progressivamente una data-structure di raccoglimento.
+   - Strutturare una hash map, un albero o un array con ordinamento per collezionare le values che afferiscono *allo stesso* token.
+   - Appena la pipe fa scattare l'EOF (chiusura totale da Mapper), raggruppare i valori e distribuire ai thread reducer worker C11 (`reducer_threads`) in task paralellely i vari bucket `<token, processed_token[]>`.
+   - Recuperare le elaborazioni per spararle inter-process al Main verso `reducer_to_main`.
+
+5. **Output Deterministico e Scrittura finale nel file `mr_start`**:
+   - Nel Main parent: recuperare i result serializzati e consolidare il tracking.
+   - Salvare in output nel file (`output_path`) in logica deterministica: **ordinati lessicograficamente** per token. I record devono contenere esplicitamente lunghezze e bytes senza assumption.
+
+6. **Target Aggiuntivi (Addendum - se richiesto dal docente)**:
+   - Implementare scansione ricorsiva (in `process_multiple_files`).
+   - Implementare parametrizzazione di una "hash function" custom deterministica (nel framework attributi e chiamata `mr_attr_set_hash_function`).
+   - Possibilità di computazioni in overlay (più `mr_create` in isolamento locale).
+   - Generazione file separato statistiche di runtime.
+
+7. **Aggiornamento Tests (`make test`)**:
+   - Creare un sistema auto-checking su file e singole directory e sui payload critici (EOF improvviso e newline bypassate).
+
+   ---
+
+   ## Pulizia e refactor effettuati
+
+   - Rimosso lo script temporaneo `update_mapper.sh` e lo script di inserimento `insert.py` utilizzati solo per patch manuali.
+   - Compilazione verificata con `make`: generati `libmr.a`, `examples/wordcount` e `tests/test_suite` senza errori di compilazione rilevanti.
+
+   Se vuoi, posso eseguire ora l'esempio `examples/wordcount` su una piccola directory di test per verificare l'intera pipeline end-to-end.
+
