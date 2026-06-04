@@ -7,6 +7,7 @@
  * Prototipo della funzione di log implementata in log_internal.c
  */
 void mr_log_internal(const char *path, const char *event, const char *msg, const char *file, int line);
+void mr_log_error_internal(const char *msg, const char *file, int line);
 
 /**
  * Macro standard: da usare quando hai mr a disposizione.

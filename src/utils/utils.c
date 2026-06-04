@@ -9,6 +9,7 @@
 #include <errno.h>
 
 #include "utils.h"
+#include "error_utils.h"
 
 ssize_t writen(int fd, const void *buf, size_t n) {
     size_t nleft = n;
@@ -83,8 +84,8 @@ int check_output_path(const char *path) {
     if (!path) return -1;
 
     // Creiamo una copia perché dirname() può modificare la stringa originale
-    char *path_copy = strdup(path);
-    if (!path_copy) return -1;
+    char *path_copy;
+    SYSNCALL_EXIT(path_copy = strdup(path), "strdup path_copy fallita");
 
     // Estraiamo il percorso della directory
     char *dir = dirname(path_copy);

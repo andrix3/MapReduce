@@ -77,3 +77,8 @@ void mr_log_internal(const char *path, const char *event, const char *msg, const
 
     mtx_unlock(&log_mtx);
 }
+
+void mr_log_error_internal(const char *msg, const char *file, int line)
+{
+    mr_log_internal(NULL, "ERROR", msg, file, line);
+}

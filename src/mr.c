@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 #include <stdint.h>
 #include <dirent.h>
+#include <signal.h>
 
 #include "mr.h"
 #include "error_utils.h"
@@ -61,6 +62,8 @@ typedef struct pair_entry {
 typedef struct {
     int out_fd;
     mtx_t out_mtx;
+    size_t results_emitted;
+    mtx_t stats_mtx;
 } reducer_emit_ctx_t;
 
 typedef struct {
@@ -106,6 +109,10 @@ static int reducer_emit_top(const char *token, const void *result, size_t result
     writen(ec->out_fd, token, token_len);
     if (rlen > 0 && result) writen(ec->out_fd, result, rlen);
     mtx_unlock(&ec->out_mtx);
+
+    mtx_lock(&ec->stats_mtx);
+    ec->results_emitted++;
+    mtx_unlock(&ec->stats_mtx);
 
     return 0;
 }
@@ -228,9 +235,8 @@ int mr_create(mr_t *mr, const mr_attr_t *attr, mr_mapper_t mapper, mr_reducer_t 
     if (!mr || !attr || !mapper || !reducer)
         return -1;
 
-    struct mr *new_mr = malloc(sizeof(struct mr));
-    if (!new_mr)
-        return -1;
+    struct mr *new_mr;
+    SYSNCALL_EXIT(new_mr = malloc(sizeof(struct mr)), "malloc struct mr fallita");
 
     // 1. Copia i valori scalari (mapper_threads, reducer_threads, queue_size)
     new_mr->attr = *attr;
@@ -241,12 +247,7 @@ int mr_create(mr_t *mr, const mr_attr_t *attr, mr_mapper_t mapper, mr_reducer_t 
 
     // Usiamo strdup per creare una copia privata della stringa.
     // In questo modo siamo indipendenti dalla memoria dell'utente.
-    new_mr->attr.log_file = strdup(target_log);
-    if (new_mr->attr.log_file == NULL)
-    {
-        free(new_mr);
-        return -1;
-    }
+    SYSNCALL_EXIT(new_mr->attr.log_file = strdup(target_log), "strdup log_file fallita");
 
     // 3. Inizializzazione degli altri campi
     new_mr->user_mapper = mapper;
@@ -287,70 +288,60 @@ int mr_start(mr_t mr, const char *input_path, const char *output_path)
     int pipe_mapper_to_reducer[2];
     int pipe_reducer_to_main[2];
 
-    if (pipe(pipe_main_to_mapper) == -1 || 
-        pipe(pipe_mapper_to_reducer) == -1 || 
-        pipe(pipe_reducer_to_main) == -1) {
-        MR_LOG(mr, "ERROR", "Creazione pipe fallita");
-        return -1;
-    }
+    CHECK_ERROR(pipe(pipe_main_to_mapper), "Creazione pipe_main_to_mapper fallita");
+    CHECK_ERROR(pipe(pipe_mapper_to_reducer), "Creazione pipe_mapper_to_reducer fallita");
+    CHECK_ERROR(pipe(pipe_reducer_to_main), "Creazione pipe_reducer_to_main fallita");
+    
     MR_LOG(mr, "INFO", "Creazione pipe completata");
 
     if ((mr->mapper_pid = fork()) == 0)
     {
         // Sono nel processo mapper
-        if (dup2(pipe_main_to_mapper[0], STDIN_FILENO) == -1 ||
-            dup2(pipe_mapper_to_reducer[1], STDOUT_FILENO) == -1) {
-            MR_LOG(mr, "ERROR", "dup2 mapper fallita");
-            _exit(EXIT_FAILURE);
-        }
+        SYSCALL_EXIT(dup2(pipe_main_to_mapper[0], STDIN_FILENO), "dup2 mapper stdin fallita");
+        SYSCALL_EXIT(dup2(pipe_mapper_to_reducer[1], STDOUT_FILENO), "dup2 mapper stdout fallita");
 
-        close(pipe_main_to_mapper[0]);
-        close(pipe_main_to_mapper[1]);
-        close(pipe_mapper_to_reducer[0]);
-        close(pipe_mapper_to_reducer[1]);
-        close(pipe_reducer_to_main[0]);
-        close(pipe_reducer_to_main[1]);
+        SYSCALL_EXIT(close(pipe_main_to_mapper[0]), "close mapper pipe_main_to_mapper[0] fallita");
+        SYSCALL_EXIT(close(pipe_main_to_mapper[1]), "close mapper pipe_main_to_mapper[1] fallita");
+        SYSCALL_EXIT(close(pipe_mapper_to_reducer[0]), "close mapper pipe_mapper_to_reducer[0] fallita");
+        SYSCALL_EXIT(close(pipe_mapper_to_reducer[1]), "close mapper pipe_mapper_to_reducer[1] fallita");
+        SYSCALL_EXIT(close(pipe_reducer_to_main[0]), "close mapper pipe_reducer_to_main[0] fallita");
+        SYSCALL_EXIT(close(pipe_reducer_to_main[1]), "close mapper pipe_reducer_to_main[1] fallita");
 
         MR_LOG(mr, "INFO", "Processo mapper creato");
         mapper_process_main(mr, STDIN_FILENO, STDOUT_FILENO);
 
         _exit(EXIT_SUCCESS);
     }
-    else if (mr->mapper_pid < 0) {
-        MR_LOG(mr, "ERROR", "Fork mapper fallita");
-        return -1;
+    else {
+        CHECK_ERROR(mr->mapper_pid, "Fork mapper fallita");
     }
 
     if ((mr->reducer_pid = fork()) == 0)
     {
         // Sono nel processo reducer
-        if (dup2(pipe_mapper_to_reducer[0], STDIN_FILENO) == -1 ||
-            dup2(pipe_reducer_to_main[1], STDOUT_FILENO) == -1) {
-            MR_LOG(mr, "ERROR", "dup2 reducer fallita");
-            _exit(EXIT_FAILURE);
-        }
+        SYSCALL_EXIT(dup2(pipe_mapper_to_reducer[0], STDIN_FILENO), "dup2 reducer stdin fallita");
+        SYSCALL_EXIT(dup2(pipe_reducer_to_main[1], STDOUT_FILENO), "dup2 reducer stdout fallita");
 
-        close(pipe_main_to_mapper[0]);
-        close(pipe_main_to_mapper[1]);
-        close(pipe_mapper_to_reducer[0]);
-        close(pipe_mapper_to_reducer[1]);
-        close(pipe_reducer_to_main[0]);
-        close(pipe_reducer_to_main[1]);
+        SYSCALL_EXIT(close(pipe_main_to_mapper[0]), "close reducer pipe_main_to_mapper[0] fallita");
+        SYSCALL_EXIT(close(pipe_main_to_mapper[1]), "close reducer pipe_main_to_mapper[1] fallita");
+        SYSCALL_EXIT(close(pipe_mapper_to_reducer[0]), "close reducer pipe_mapper_to_reducer[0] fallita");
+        SYSCALL_EXIT(close(pipe_mapper_to_reducer[1]), "close reducer pipe_mapper_to_reducer[1] fallita");
+        SYSCALL_EXIT(close(pipe_reducer_to_main[0]), "close reducer pipe_reducer_to_main[0] fallita");
+        SYSCALL_EXIT(close(pipe_reducer_to_main[1]), "close reducer pipe_reducer_to_main[1] fallita");
 
         MR_LOG(mr, "INFO", "Processo reducer creato");
         reducer_process_main(mr, STDIN_FILENO, STDOUT_FILENO);
 
         _exit(EXIT_SUCCESS);
     }
-    else if (mr->reducer_pid < 0) {
-        MR_LOG(mr, "ERROR", "Fork reducer fallita");
-        return -1;
+    else {
+        CHECK_ERROR(mr->reducer_pid, "Fork reducer fallita");
     }
 
-    close(pipe_main_to_mapper[0]);
-    close(pipe_mapper_to_reducer[0]);
-    close(pipe_mapper_to_reducer[1]);
-    close(pipe_reducer_to_main[1]);
+    CHECK_ERROR(close(pipe_main_to_mapper[0]), "close parent pipe_main_to_mapper[0] fallita");
+    CHECK_ERROR(close(pipe_mapper_to_reducer[0]), "close parent pipe_mapper_to_reducer[0] fallita");
+    CHECK_ERROR(close(pipe_mapper_to_reducer[1]), "close parent pipe_mapper_to_reducer[1] fallita");
+    CHECK_ERROR(close(pipe_reducer_to_main[1]), "close parent pipe_reducer_to_main[1] fallita");
 
     mr->main_to_mapper_write = pipe_main_to_mapper[1];
     mr->reducer_to_main_read = pipe_reducer_to_main[0];
@@ -369,13 +360,11 @@ int mr_start(mr_t mr, const char *input_path, const char *output_path)
         MR_LOG(mr, "ERROR", "mr_start: errore durante l'elaborazione dell'input");
     }
 
-    close(mr->main_to_mapper_write);
+    CHECK_ERROR(close(mr->main_to_mapper_write), "close main_to_mapper_write fallita");
     mr->main_to_mapper_write = -1;
 
     /* ricevo da reducer e scrivo su output (leggo tutti i record, ordino e
        scrivo file di output in formato: int token_len; token bytes; int result_len; result bytes) */
-
-    /* out_entry_t moved to top-level */
 
     out_entry_t *outs = NULL;
     size_t outs_count = 0, outs_cap = 0;
@@ -384,35 +373,35 @@ int mr_start(mr_t mr, const char *input_path, const char *output_path)
         int token_len = 0;
         ssize_t rn = readn(mr->reducer_to_main_read, &token_len, sizeof(int));
         if (rn == 0) break; /* EOF */
-        if (rn < 0) { MR_LOG(mr, "ERROR", "mr_start: errore lettura token_len"); break; }
+        CHECK_ERROR(rn, "mr_start: errore lettura token_len");
 
         int result_len = 0;
-        if (readn(mr->reducer_to_main_read, &result_len, sizeof(int)) <= 0) { MR_LOG(mr, "ERROR", "mr_start: errore lettura result_len"); break; }
+        CHECK_ERROR(readn(mr->reducer_to_main_read, &result_len, sizeof(int)), "mr_start: errore lettura result_len");
 
-        if (token_len < 0 || result_len < 0) { MR_LOG(mr, "ERROR", "mr_start: lunghezze negative"); break; }
+        if (token_len < 0 || result_len < 0) { 
+            MR_LOG(mr, "ERROR", "mr_start: lunghezze negative"); 
+            return -1;
+        }
 
         char *token = NULL;
         if (token_len > 0) {
-            token = malloc((size_t)token_len + 1);
-            if (!token) { MR_LOG(mr, "ERROR", "mr_start: malloc token"); break; }
-            if (readn(mr->reducer_to_main_read, token, token_len) != token_len) { free(token); break; }
+            SYSNCALL_EXIT(token = malloc((size_t)token_len + 1), "malloc token fallita");
+            if (readn(mr->reducer_to_main_read, token, token_len) != token_len) { free(token); return -1; }
             token[token_len] = '\0';
         } else {
-            token = strdup("");
+            SYSNCALL_EXIT(token = strdup(""), "strdup token fallita");
         }
 
         void *result = NULL;
         if (result_len > 0) {
-            result = malloc((size_t)result_len);
-            if (!result) { free(token); MR_LOG(mr, "ERROR", "mr_start: malloc result"); break; }
-            if (readn(mr->reducer_to_main_read, result, result_len) != result_len) { free(token); free(result); break; }
+            SYSNCALL_EXIT(result = malloc((size_t)result_len), "malloc result fallita");
+            if (readn(mr->reducer_to_main_read, result, result_len) != result_len) { free(token); free(result); return -1; }
         }
 
         if (outs_count == outs_cap) {
             size_t nc = outs_cap ? outs_cap * 2 : 256;
-            out_entry_t *tmp = realloc(outs, nc * sizeof(*outs));
-            if (!tmp) { free(token); free(result); MR_LOG(mr, "ERROR", "mr_start: realloc outs"); break; }
-            outs = tmp; outs_cap = nc;
+            SYSNCALL_EXIT(outs = realloc(outs, nc * sizeof(*outs)), "realloc outs fallita");
+            outs_cap = nc;
         }
 
         outs[outs_count].token = token;
@@ -423,16 +412,21 @@ int mr_start(mr_t mr, const char *input_path, const char *output_path)
     }
 
     /* Chiudo descrittore di lettura dalla pipe del reducer */
-    close(mr->reducer_to_main_read);
+    CHECK_ERROR(close(mr->reducer_to_main_read), "close reducer_to_main_read fallita");
     mr->reducer_to_main_read = -1;
 
     /* Ordino lessicograficamente per token per garantire determinismo */
     if (outs_count > 1) qsort(outs, outs_count, sizeof(*outs), out_cmp);
 
     /* Scrivo su file di output (sovrascrivo/creo) */
+    char log_buf[256];
+    snprintf(log_buf, sizeof(log_buf), "Apertura file di output: %s", output_path);
+    MR_LOG(mr, "INFO", log_buf);
+
     FILE *ofd = fopen(output_path, "wb");
     if (!ofd) {
         MR_LOG(mr, "ERROR", "mr_start: impossibile aprire output_path");
+        return -1;
     } else {
         for (size_t i = 0; i < outs_count; i++) {
             int tlen = outs[i].token_len;
@@ -445,6 +439,8 @@ int mr_start(mr_t mr, const char *input_path, const char *output_path)
         }
         fclose(ofd);
     }
+    snprintf(log_buf, sizeof(log_buf), "Chiusura file di output: %s", output_path);
+    MR_LOG(mr, "INFO", log_buf);
 
     /* Pulizia */
     for (size_t i = 0; i < outs_count; i++) {
@@ -453,8 +449,8 @@ int mr_start(mr_t mr, const char *input_path, const char *output_path)
     }
     free(outs);
 
-    waitpid(mr->mapper_pid, NULL, 0);
-    waitpid(mr->reducer_pid, NULL, 0);
+    CHECK_ERROR(waitpid(mr->mapper_pid, NULL, 0), "waitpid mapper fallita");
+    CHECK_ERROR(waitpid(mr->reducer_pid, NULL, 0), "waitpid reducer fallita");
 
     return (input_status == 0) ? 0 : -1;
 }
@@ -468,11 +464,11 @@ int mr_destroy(mr_t mr)
 
     if (mr->main_to_mapper_write != -1)
     {
-        close(mr->main_to_mapper_write);
+        CHECK_ERROR(close(mr->main_to_mapper_write), "close mr_destroy main_to_mapper_write fallita");
     }
     if (mr->reducer_to_main_read != -1)
     {
-        close(mr->reducer_to_main_read);
+        CHECK_ERROR(close(mr->reducer_to_main_read), "close mr_destroy reducer_to_main_read fallita");
     }
 
     if (mr->attr.log_file)
@@ -618,6 +614,9 @@ typedef struct {
     int pipe_out;
     line_queue_t queue;
     mtx_t pipe_out_mtx;
+    size_t lines_read;
+    size_t pairs_produced;
+    mtx_t stats_mtx;
 } mapper_ctx_t;
 
 static int mapper_emit(const char *token, const void *value, size_t value_size, void *emit_arg) {
@@ -639,38 +638,42 @@ static int mapper_emit(const char *token, const void *value, size_t value_size, 
     }
         
     mtx_unlock(&ctx->pipe_out_mtx);
+
+    mtx_lock(&ctx->stats_mtx);
+    ctx->pairs_produced++;
+    mtx_unlock(&ctx->stats_mtx);
+
     return 0;
 }
 
 static int reader_main(void *arg) {
     mapper_ctx_t *ctx = (mapper_ctx_t *)arg;
+    MR_LOG(ctx->mr, "INFO", "Mapper reader thread started");
     
     while(1) {
         int path_len_int = 0;
         ssize_t n = readn(ctx->pipe_in, &path_len_int, sizeof(int));
         if (n == 0) break; // EOF
-        if (n < 0 || path_len_int < 0) {
-            MR_LOG(ctx->mr, "ERROR", "Mapper reader: error reading path_len");
-            break;
-        }
+        CHECK_ERROR(n, "Mapper reader: error reading path_len");
         
-        char *path = malloc(path_len_int + 1);
-        if (!path) break;
-        readn(ctx->pipe_in, path, path_len_int);
+        char *path;
+        SYSNCALL_EXIT(path = malloc(path_len_int + 1), "malloc path fallita");
+        CHECK_ERROR(readn(ctx->pipe_in, path, path_len_int), "Mapper reader: error reading path");
         path[path_len_int] = '\0';
         
         int line_num_int = 0;
-        readn(ctx->pipe_in, &line_num_int, sizeof(int));
+        CHECK_ERROR(readn(ctx->pipe_in, &line_num_int, sizeof(int)), "Mapper reader: error reading line_num");
         
         int line_len_int = 0;
-        readn(ctx->pipe_in, &line_len_int, sizeof(int));
+        CHECK_ERROR(readn(ctx->pipe_in, &line_len_int, sizeof(int)), "Mapper reader: error reading line_len");
         if (line_len_int < 0) line_len_int = 0;
 
-        char *line = malloc(line_len_int + 1);
-        if (line_len_int > 0 && line) {
-            readn(ctx->pipe_in, line, line_len_int);
+        char *line;
+        SYSNCALL_EXIT(line = malloc(line_len_int + 1), "malloc line fallita");
+        if (line_len_int > 0) {
+            CHECK_ERROR(readn(ctx->pipe_in, line, line_len_int), "Mapper reader: error reading line content");
         }
-        if (line) line[line_len_int] = '\0';
+        line[line_len_int] = '\0';
         
         internal_line_t iline;
         iline.file_name = path;
@@ -690,6 +693,10 @@ static int reader_main(void *arg) {
         
         cnd_signal(&ctx->queue.not_empty);
         mtx_unlock(&ctx->queue.mtx);
+
+        mtx_lock(&ctx->stats_mtx);
+        ctx->lines_read++;
+        mtx_unlock(&ctx->stats_mtx);
     }
     
     mtx_lock(&ctx->queue.mtx);
@@ -697,6 +704,7 @@ static int reader_main(void *arg) {
     cnd_broadcast(&ctx->queue.not_empty);
     mtx_unlock(&ctx->queue.mtx);
     
+    MR_LOG(ctx->mr, "INFO", "Mapper reader thread ended");
     return 0;
 }
 
@@ -745,9 +753,11 @@ static void mapper_process_main(struct mr *mr, int pipe_in, int pipe_out)
     ctx.mr = mr;
     ctx.pipe_in = pipe_in;
     ctx.pipe_out = pipe_out;
+    ctx.lines_read = 0;
+    ctx.pairs_produced = 0;
     
     ctx.queue.max_size = mr->attr.queue_size;
-    ctx.queue.buffer = malloc(sizeof(internal_line_t) * ctx.queue.max_size);
+    SYSNCALL_EXIT(ctx.queue.buffer = malloc(sizeof(internal_line_t) * ctx.queue.max_size), "malloc mapper buffer fallita");
     ctx.queue.head = 0;
     ctx.queue.tail = 0;
     ctx.queue.size = 0;
@@ -756,11 +766,13 @@ static void mapper_process_main(struct mr *mr, int pipe_in, int pipe_out)
     cnd_init(&ctx.queue.not_empty);
     cnd_init(&ctx.queue.not_full);
     mtx_init(&ctx.pipe_out_mtx, mtx_plain);
+    mtx_init(&ctx.stats_mtx, mtx_plain);
 
     thrd_t reader_thrd;
     thrd_create(&reader_thrd, reader_main, &ctx);
     
-    thrd_t *worker_thrds = malloc(sizeof(thrd_t) * mr->attr.mapper_threads);
+    thrd_t *worker_thrds;
+    SYSNCALL_EXIT(worker_thrds = malloc(sizeof(thrd_t) * mr->attr.mapper_threads), "malloc mapper worker_thrds fallita");
     for (size_t i = 0; i < mr->attr.mapper_threads; i++) {
         thrd_create(&worker_thrds[i], mapper_worker_main, &ctx);
     }
@@ -769,6 +781,10 @@ static void mapper_process_main(struct mr *mr, int pipe_in, int pipe_out)
     for (size_t i = 0; i < mr->attr.mapper_threads; i++) {
         thrd_join(worker_thrds[i], NULL);
     }
+
+    char log_msg[128];
+    snprintf(log_msg, sizeof(log_msg), "Mapper: righe lette = %zu, coppie prodotte = %zu", ctx.lines_read, ctx.pairs_produced);
+    MR_LOG(mr, "INFO", log_msg);
     
     free(ctx.queue.buffer);
     free(worker_thrds);
@@ -776,21 +792,20 @@ static void mapper_process_main(struct mr *mr, int pipe_in, int pipe_out)
     cnd_destroy(&ctx.queue.not_empty);
     cnd_destroy(&ctx.queue.not_full);
     mtx_destroy(&ctx.pipe_out_mtx);
+    mtx_destroy(&ctx.stats_mtx);
 }
 
 static int reducer_reader_main(void *arg)
 {
     reducer_reader_ctx_t *ctx = (reducer_reader_ctx_t *)arg;
     const int MAX_FIELD = 10 * 1024 * 1024;
+    MR_LOG(ctx->mr, "INFO", "Reducer reader thread started");
 
     while (1) {
         mr_pair_header_t header;
         ssize_t rn = readn(ctx->pipe_in, &header, sizeof(header));
         if (rn == 0) break;
-        if (rn < 0) {
-            MR_LOG(ctx->mr, "ERROR", "Reducer reader: errore lettura header");
-            return -1;
-        }
+        CHECK_ERROR(rn, "Reducer reader: errore lettura header");
 
         if (header.token_len < 0 || header.value_len < 0 ||
             header.token_len > MAX_FIELD || header.value_len > MAX_FIELD) {
@@ -798,21 +813,19 @@ static int reducer_reader_main(void *arg)
             return -1;
         }
 
-        char *token = malloc((size_t)header.token_len + 1);
-        if (!token) return -1;
-        if (header.token_len > 0 && readn(ctx->pipe_in, token, header.token_len) != header.token_len) {
-            free(token);
-            return -1;
+        char *token;
+        SYSNCALL_EXIT(token = malloc((size_t)header.token_len + 1), "malloc token fallita");
+        if (header.token_len > 0) {
+            if (readn(ctx->pipe_in, token, header.token_len) != header.token_len) {
+                free(token);
+                return -1;
+            }
         }
         token[header.token_len] = '\0';
 
         void *value = NULL;
         if (header.value_len > 0) {
-            value = malloc((size_t)header.value_len);
-            if (!value) {
-                free(token);
-                return -1;
-            }
+            SYSNCALL_EXIT(value = malloc((size_t)header.value_len), "malloc value fallita");
             if (readn(ctx->pipe_in, value, header.value_len) != header.value_len) {
                 free(token);
                 free(value);
@@ -822,13 +835,7 @@ static int reducer_reader_main(void *arg)
 
         if (ctx->pairs_count == ctx->pairs_cap) {
             size_t newcap = ctx->pairs_cap ? ctx->pairs_cap * 2 : 256;
-            pair_entry_t *tmp = realloc(ctx->pairs, newcap * sizeof(*ctx->pairs));
-            if (!tmp) {
-                free(token);
-                free(value);
-                return -1;
-            }
-            ctx->pairs = tmp;
+            SYSNCALL_EXIT(ctx->pairs = realloc(ctx->pairs, newcap * sizeof(*ctx->pairs)), "realloc pairs fallita");
             ctx->pairs_cap = newcap;
         }
 
@@ -839,12 +846,14 @@ static int reducer_reader_main(void *arg)
         ctx->pairs_count++;
     }
 
+    MR_LOG(ctx->mr, "INFO", "Reducer reader thread ended");
     return 0;
 }
 
 static int reducer_worker_main(void *arg)
 {
     reducer_worker_ctx_t *ctx = (reducer_worker_ctx_t *)arg;
+    MR_LOG(ctx->mr, "INFO", "Reducer worker thread started");
 
     while (1) {
         size_t group_index;
@@ -863,6 +872,7 @@ static int reducer_worker_main(void *arg)
                               ctx->mr->user_arg);
     }
 
+    MR_LOG(ctx->mr, "INFO", "Reducer worker thread ended");
     return 0;
 }
 
@@ -889,55 +899,53 @@ static void reducer_process_main(struct mr *mr, int pipe_in, int pipe_out)
 
     reducer_emit_ctx_t emit_ctx;
     emit_ctx.out_fd = pipe_out;
+    emit_ctx.results_emitted = 0;
     mtx_init(&emit_ctx.out_mtx, mtx_plain);
+    mtx_init(&emit_ctx.stats_mtx, mtx_plain);
 
     if (pairs_count == 0) {
         close(pipe_out);
         mtx_destroy(&emit_ctx.out_mtx);
+        mtx_destroy(&emit_ctx.stats_mtx);
         MR_LOG(mr, "INFO", "Reducer: nessuna coppia ricevuta");
         return;
     }
 
+    // 1. Ordina per token
     qsort(pairs, pairs_count, sizeof(*pairs), cmp_pairs);
 
-    reduce_group_t *groups = malloc(sizeof(*groups) * pairs_count);
-    if (!groups) {
-        MR_LOG(mr, "ERROR", "Reducer: malloc groups fallita");
-        for (size_t k = 0; k < pairs_count; k++) {
-            free(pairs[k].token);
-            free(pairs[k].value);
-        }
-        free(pairs);
-        close(pipe_out);
-        mtx_destroy(&emit_ctx.out_mtx);
-        return;
+    // 2. Conta i gruppi (token distinti)
+    size_t groups_count = 1;
+    for (size_t k = 1; k < pairs_count; k++) {
+        if (strcmp(pairs[k].token, pairs[k-1].token) != 0) groups_count++;
     }
 
-    size_t groups_count = 0;
+    // 3. Alloca i gruppi
+    reduce_group_t *groups;
+    SYSNCALL_EXIT(groups = malloc(sizeof(reduce_group_t) * groups_count), "malloc groups fallita");
+
+    size_t g_idx = 0;
     size_t i = 0;
     while (i < pairs_count) {
         size_t j = i + 1;
         while (j < pairs_count && strcmp(pairs[i].token, pairs[j].token) == 0) j++;
 
         size_t values_count = j - i;
-        groups[groups_count].token = pairs[i].token;
-        groups[groups_count].token_len = pairs[i].token_len;
-        groups[groups_count].values_count = values_count;
-        groups[groups_count].values = malloc(sizeof(mr_value_t) * values_count);
-        if (!groups[groups_count].values) {
-            MR_LOG(mr, "ERROR", "Reducer: malloc values fallita");
-            break;
-        }
+        groups[g_idx].token = pairs[i].token;
+        groups[g_idx].token_len = pairs[i].token_len;
+        groups[g_idx].values_count = values_count;
+        SYSNCALL_EXIT(groups[g_idx].values = malloc(sizeof(mr_value_t) * values_count), "malloc group values fallita");
 
         for (size_t k = 0; k < values_count; k++) {
-            groups[groups_count].values[k].data = pairs[i + k].value;
-            groups[groups_count].values[k].size = (size_t)pairs[i + k].value_len;
+            groups[g_idx].values[k].data = pairs[i + k].value;
+            groups[g_idx].values[k].size = (size_t)pairs[i + k].value_len;
         }
 
-        groups_count++;
+        g_idx++;
         i = j;
     }
 
+    // 4. Elaborazione parallela
     reducer_worker_ctx_t worker_ctx;
     worker_ctx.mr = mr;
     worker_ctx.emit_ctx = &emit_ctx;
@@ -947,27 +955,29 @@ static void reducer_process_main(struct mr *mr, int pipe_in, int pipe_out)
     mtx_init(&worker_ctx.next_group_mtx, mtx_plain);
 
     size_t worker_count = mr->attr.reducer_threads > 0 ? mr->attr.reducer_threads : 1;
-    thrd_t *workers = malloc(sizeof(thrd_t) * worker_count);
-    if (workers) {
-        size_t created = 0;
-        for (size_t t = 0; t < worker_count; t++) {
-            if (thrd_create(&workers[t], reducer_worker_main, &worker_ctx) != thrd_success) {
-                MR_LOG(mr, "ERROR", "Reducer: impossibile creare worker thread");
-                break;
-            }
-            created++;
+    thrd_t *workers;
+    SYSNCALL_EXIT(workers = malloc(sizeof(thrd_t) * worker_count), "malloc reducer workers fallita");
+
+    for (size_t t = 0; t < worker_count; t++) {
+        if (thrd_create(&workers[t], reducer_worker_main, &worker_ctx) != thrd_success) {
+            MR_LOG(mr, "ERROR", "Reducer: impossibile creare worker thread");
+            // Se fallisce la creazione di un thread, andiamo avanti con quelli creati
+            worker_count = t;
+            break;
         }
-        for (size_t t = 0; t < created; t++) {
-            thrd_join(workers[t], NULL);
-        }
-        free(workers);
-    } else {
-        MR_LOG(mr, "ERROR", "Reducer: malloc worker threads fallita");
-        reducer_worker_main(&worker_ctx);
     }
+    for (size_t t = 0; t < worker_count; t++) {
+        thrd_join(workers[t], NULL);
+    }
+    free(workers);
 
     mtx_destroy(&worker_ctx.next_group_mtx);
 
+    char log_msg[128];
+    snprintf(log_msg, sizeof(log_msg), "Reducer: token distinti = %zu, risultati prodotti = %zu", groups_count, emit_ctx.results_emitted);
+    MR_LOG(mr, "INFO", log_msg);
+
+    // 5. Cleanup
     for (size_t g = 0; g < groups_count; g++) {
         free(groups[g].values);
     }
@@ -975,14 +985,11 @@ static void reducer_process_main(struct mr *mr, int pipe_in, int pipe_out)
 
     for (size_t k = 0; k < pairs_count; k++) {
         free(pairs[k].token);
-        free(pairs[k].value);
+        if (pairs[k].value) free(pairs[k].value);
     }
     free(pairs);
 
     close(pipe_out);
     mtx_destroy(&emit_ctx.out_mtx);
-
-    char log_msg[128];
-    snprintf(log_msg, sizeof(log_msg), "Reducer: gruppi elaborati = %zu", groups_count);
-    MR_LOG(mr, "INFO", log_msg);
+    mtx_destroy(&emit_ctx.stats_mtx);
 }
