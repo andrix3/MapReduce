@@ -196,34 +196,117 @@ static int mapper_emit(const char *token, const void *value, size_t value_size, 
 
 static int reader_main(void *arg) {
     mapper_ctx_t *ctx = (mapper_ctx_t *)arg;
-    while (1) {
-        int pl = 0;
-        ssize_t bytes_read = readn(ctx->pipe_in, &pl, sizeof(int));
-        if (bytes_read <= 0) break;
-        if (pl <= 0 || pl > MAX_PATH_LEN) goto r_err;
-        char *path = malloc((size_t)(pl + 1));
-        if (!path) goto r_err;
-        if (readn(ctx->pipe_in, path, (size_t)pl) != (ssize_t)pl) { free(path); goto r_err; }
-        path[pl] = '\0';
-        int ln = 0, ll = 0;
-        if (readn(ctx->pipe_in, &ln, sizeof(int)) != (ssize_t)sizeof(int)) { free(path); goto r_err; }
-        if (readn(ctx->pipe_in, &ll, sizeof(int)) != (ssize_t)sizeof(int)) { free(path); goto r_err; }
-        if (ll < 0 || ll > MAX_LINE_LEN) { free(path); goto r_err; }
-        char *line = malloc((size_t)(ll + 1));
-        if (!line) { free(path); goto r_err; }
-        if (ll > 0) {
-            if (readn(ctx->pipe_in, line, (size_t)ll) != (ssize_t)ll) { free(path); free(line); goto r_err; }
+    const int MAX_PATH_LIMIT = 4096;
+    const int MAX_LINE_LIMIT = 10 * 1024 * 1024; // 10MB
+    int read_error = 0;
+
+    MR_LOG(ctx->mr, "INFO", "Mapper reader thread started");
+    while(1) {
+        int path_len_int = 0;
+        ssize_t n = readn(ctx->pipe_in, &path_len_int, sizeof(int));
+        if (n == 0) break; // EOF
+        if (n < 0) {
+            MR_LOG(ctx->mr, "ERROR", "Mapper reader: error reading path_len");
+            read_error = 1;
+            break;
         }
-        line[ll] = '\0';
+
+        // Convalida della lunghezza del percorso (Prevenzione Buffer Overflow)
+        if (path_len_int < 0 || path_len_int > MAX_PATH_LIMIT) {
+            MR_LOG(ctx->mr, "ERROR", "Mapper reader: path_len non valido o eccessivo");
+            read_error = 1;
+            break;
+        }
+
+        char *path = malloc((size_t)path_len_int + 1);
+        if (path == NULL) {
+            MR_LOG(ctx->mr, "ERROR", "Mapper reader: malloc path fallita");
+            read_error = 1;
+            break;
+        }
+
+        if (readn(ctx->pipe_in, path, path_len_int) != path_len_int) {
+            MR_LOG(ctx->mr, "ERROR", "Mapper reader: error reading path content");
+            free(path);
+            read_error = 1;
+            break;
+        }
+        path[path_len_int] = '\0';
+
+        int line_num_int = 0;
+        if (readn(ctx->pipe_in, &line_num_int, sizeof(int)) != sizeof(int)) {
+            MR_LOG(ctx->mr, "ERROR", "Mapper reader: error reading line_num");
+            free(path);
+            read_error = 1;
+            break;
+        }
+
+        int line_len_int = 0;
+        if (readn(ctx->pipe_in, &line_len_int, sizeof(int)) != sizeof(int)) {
+            MR_LOG(ctx->mr, "ERROR", "Mapper reader: error reading line_len");
+            free(path);
+            read_error = 1;
+            break;
+        }
+
+        // Convalida della lunghezza della riga (Prevenzione Buffer Overflow)
+        if (line_len_int < 0 || line_len_int > MAX_LINE_LIMIT) {
+            MR_LOG(ctx->mr, "ERROR", "Mapper reader: line_len non valido o eccessivo");
+            free(path);
+            read_error = 1;
+            break;
+        }
+
+        char *line = malloc((size_t)line_len_int + 1);
+        if (line == NULL) {
+            MR_LOG(ctx->mr, "ERROR", "Mapper reader: malloc line fallita");
+            free(path);
+            read_error = 1;
+            break;
+        }
+
+        if (line_len_int > 0) {
+            if (readn(ctx->pipe_in, line, line_len_int) != line_len_int) {
+                MR_LOG(ctx->mr, "ERROR", "Mapper reader: error reading line content");
+                free(path);
+                free(line);
+                read_error = 1;
+                break;
+            }
+        }
+        line[line_len_int] = '\0';
+
+        internal_line_t iline;
+        iline.file_name = path;
+        iline.file_name_len = path_len_int;
+        iline.line_number = (unsigned long)line_num_int;
+        iline.line = line;
+        iline.line_len = (size_t)line_len_int;
+
+        // Inserimento bloccante in coda
         mtx_lock(&ctx->queue.mtx);
-        while (ctx->queue.size == ctx->queue.max_size && !ctx->queue.eof) cnd_wait(&ctx->queue.not_full, &ctx->queue.mtx);
-        ctx->queue.buffer[ctx->queue.tail] = (internal_line_t){path, (size_t)pl, (unsigned long)ln, line, (size_t)ll};
-        ctx->queue.tail = (ctx->queue.tail+1)%ctx->queue.max_size; ctx->queue.size++;
-        cnd_signal(&ctx->queue.not_empty); mtx_unlock(&ctx->queue.mtx);
+        while(ctx->queue.size == ctx->queue.max_size) {
+            cnd_wait(&ctx->queue.not_full, &ctx->queue.mtx);
+        }
+        ctx->queue.buffer[ctx->queue.tail] = iline;
+        ctx->queue.tail = (ctx->queue.tail + 1) % ctx->queue.max_size;
+        ctx->queue.size++;
+        cnd_signal(&ctx->queue.not_empty);
+        mtx_unlock(&ctx->queue.mtx);
+
+        mtx_lock(&ctx->stats_mtx);
+        ctx->lines_read++;
+        mtx_unlock(&ctx->stats_mtx);
     }
-r_err:
-    mtx_lock(&ctx->queue.mtx); ctx->queue.eof = 1; cnd_broadcast(&ctx->queue.not_empty); mtx_unlock(&ctx->queue.mtx);
-    return 0;
+
+    // Risveglio e sblocco garantito di tutti i thread worker (Prevenzione Deadlock)
+    mtx_lock(&ctx->queue.mtx);
+    ctx->queue.eof = 1;
+    cnd_broadcast(&ctx->queue.not_empty);
+    mtx_unlock(&ctx->queue.mtx);
+
+    MR_LOG(ctx->mr, "INFO", "Mapper reader thread ended");
+    return read_error ? -1 : 0;
 }
 
 static int mapper_worker_main(void *arg) {
@@ -248,14 +331,64 @@ static void mapper_process_main(struct mr *mr, int pipe_in, int pipe_out) {
     ctx.mr = mr;
     ctx.pipe_in = pipe_in;
     ctx.pipe_out = pipe_out;
-    ctx.queue.max_size = mr->attr.queue_size; ctx.queue.buffer = malloc(sizeof(internal_line_t)*ctx.queue.max_size);
-    mtx_init(&ctx.queue.mtx, mtx_plain); cnd_init(&ctx.queue.not_empty); cnd_init(&ctx.queue.not_full);
-    mtx_init(&ctx.pipe_out_mtx, mtx_plain); mtx_init(&ctx.stats_mtx, mtx_plain);
-    thrd_t r; thrd_create(&r, reader_main, &ctx);
-    thrd_t *ws = malloc(sizeof(thrd_t)*mr->attr.mapper_threads);
-    for (size_t i=0; i<mr->attr.mapper_threads; i++) thrd_create(&ws[i], mapper_worker_main, &ctx);
-    thrd_join(r, NULL); for (size_t i=0; i<mr->attr.mapper_threads; i++) thrd_join(ws[i], NULL);
-    free(ws); free(ctx.queue.buffer);
+    ctx.queue.max_size = mr->attr.queue_size;
+    ctx.queue.buffer = malloc(sizeof(internal_line_t) * ctx.queue.max_size);
+    if (!ctx.queue.buffer) {
+        MR_LOG(mr, "ERROR", "mapper_process_main: malloc queue buffer failed");
+        return;
+    }
+    thrd_t *ws = malloc(sizeof(thrd_t) * mr->attr.mapper_threads);
+    if (!ws) {
+        MR_LOG(mr, "ERROR", "mapper_process_main: malloc ws failed");
+        free(ctx.queue.buffer);
+        return;
+    }
+
+    mtx_init(&ctx.queue.mtx, mtx_plain);
+    cnd_init(&ctx.queue.not_empty);
+    cnd_init(&ctx.queue.not_full);
+    mtx_init(&ctx.pipe_out_mtx, mtx_plain);
+    mtx_init(&ctx.stats_mtx, mtx_plain);
+
+    thrd_t r;
+    int reader_created = 0;
+    if (thrd_create(&r, reader_main, &ctx) == thrd_success) {
+        reader_created = 1;
+    } else {
+        MR_LOG(mr, "ERROR", "mapper_process_main: thrd_create reader failed");
+        ctx.queue.eof = 1;
+    }
+
+    size_t workers_created = 0;
+    for (size_t i = 0; i < mr->attr.mapper_threads; i++) {
+        if (thrd_create(&ws[i], mapper_worker_main, &ctx) == thrd_success) {
+            workers_created++;
+        } else {
+            MR_LOG(mr, "ERROR", "mapper_process_main: thrd_create worker failed");
+        }
+    }
+
+    if (reader_created) {
+        thrd_join(r, NULL);
+    }
+    for (size_t i = 0; i < workers_created; i++) {
+        thrd_join(ws[i], NULL);
+    }
+
+    for (size_t i = ctx.queue.head; ctx.queue.size > 0; i = (i + 1) % ctx.queue.max_size) {
+        free(ctx.queue.buffer[i].file_name);
+        free(ctx.queue.buffer[i].line);
+        ctx.queue.size--;
+    }
+
+    mtx_destroy(&ctx.queue.mtx);
+    cnd_destroy(&ctx.queue.not_empty);
+    cnd_destroy(&ctx.queue.not_full);
+    mtx_destroy(&ctx.pipe_out_mtx);
+    mtx_destroy(&ctx.stats_mtx);
+
+    free(ws);
+    free(ctx.queue.buffer);
 }
 
 static int reducer_reader_main(void *arg) {
@@ -264,7 +397,7 @@ static int reducer_reader_main(void *arg) {
         mr_pair_header_t h;
         ssize_t bytes_read = readn(ctx->pipe_in, &h, sizeof(h));
         if (bytes_read <= 0) break;
-        if (h.token_len < 0 || h.value_len < 0) break;
+        if (h.token_len < 0 || h.token_len > MAX_PATH_LEN || h.value_len < 0 || h.value_len > MAX_VALUE_LEN) break;
         char *tok = malloc((size_t)(h.token_len + 1));
         if (!tok) break;
         if (readn(ctx->pipe_in, tok, (size_t)h.token_len) != (ssize_t)h.token_len) { free(tok); break; }
@@ -299,24 +432,80 @@ static int reducer_worker_main(void *arg) {
 
 static void reducer_process_main(struct mr *mr, int pipe_in, int pipe_out) {
     reducer_reader_ctx_t rctx = {mr, pipe_in, NULL, 0, 0};
-    thrd_t r; thrd_create(&r, reducer_reader_main, &rctx); thrd_join(r, NULL);
-    if (rctx.pairs_count == 0) { close(pipe_out); return; }
+    thrd_t r;
+    if (thrd_create(&r, reducer_reader_main, &rctx) == thrd_success) {
+        thrd_join(r, NULL);
+    } else {
+        MR_LOG(mr, "ERROR", "reducer_process_main: thrd_create reader failed");
+    }
+
+    if (rctx.pairs_count == 0) {
+        if (rctx.pairs) free(rctx.pairs);
+        close(pipe_out);
+        return;
+    }
     qsort(rctx.pairs, rctx.pairs_count, sizeof(pair_entry_t), cmp_pairs);
-    size_t gc = 1; for (size_t i=1; i<rctx.pairs_count; i++) if (strcmp(rctx.pairs[i].token, rctx.pairs[i-1].token)!=0) gc++;
-    reduce_group_t *gs = malloc(sizeof(reduce_group_t)*gc);
-    size_t gi=0, pi=0;
+    size_t gc = 1;
+    for (size_t i = 1; i < rctx.pairs_count; i++) {
+        if (strcmp(rctx.pairs[i].token, rctx.pairs[i-1].token) != 0) {
+            gc++;
+        }
+    }
+
+    reduce_group_t *gs = malloc(sizeof(reduce_group_t) * gc);
+    if (!gs) {
+        MR_LOG(mr, "ERROR", "reducer_process_main: malloc gs failed");
+        for (size_t i = 0; i < rctx.pairs_count; i++) {
+            free(rctx.pairs[i].token);
+            free(rctx.pairs[i].value);
+        }
+        free(rctx.pairs);
+        close(pipe_out);
+        return;
+    }
+
+    size_t gi = 0, pi = 0;
+    int alloc_err = 0;
     while (pi < rctx.pairs_count) {
-        size_t s = pi; while (pi < rctx.pairs_count && strcmp(rctx.pairs[pi].token, rctx.pairs[s].token)==0) pi++;
-        gs[gi].token = rctx.pairs[s].token; gs[gi].values_count = pi-s;
-        gs[gi].values = malloc(sizeof(mr_value_t)*(pi-s));
-        for (size_t k=0; k<(pi-s); k++) { gs[gi].values[k].data = rctx.pairs[s+k].value; gs[gi].values[k].size = (size_t)rctx.pairs[s+k].value_len; }
+        size_t s = pi;
+        while (pi < rctx.pairs_count && strcmp(rctx.pairs[pi].token, rctx.pairs[s].token) == 0) {
+            pi++;
+        }
+        gs[gi].token = rctx.pairs[s].token;
+        gs[gi].values_count = pi - s;
+        gs[gi].values = malloc(sizeof(mr_value_t) * (pi - s));
+        if (!gs[gi].values) {
+            alloc_err = 1;
+            break;
+        }
+        for (size_t k = 0; k < (pi - s); k++) {
+            gs[gi].values[k].data = rctx.pairs[s+k].value;
+            gs[gi].values[k].size = (size_t)rctx.pairs[s+k].value_len;
+        }
         gi++;
     }
+
+    if (alloc_err) {
+        MR_LOG(mr, "ERROR", "reducer_process_main: malloc values failed");
+        for (size_t i = 0; i < gi; i++) {
+            free(gs[i].values);
+        }
+        free(gs);
+        for (size_t i = 0; i < rctx.pairs_count; i++) {
+            free(rctx.pairs[i].token);
+            free(rctx.pairs[i].value);
+        }
+        free(rctx.pairs);
+        close(pipe_out);
+        return;
+    }
+
     reducer_emit_ctx_t ectx;
     memset(&ectx, 0, sizeof(ectx));
     ectx.out_fd = pipe_out;
-    mtx_init(&ectx.out_mtx, mtx_plain); mtx_init(&ectx.stats_mtx, mtx_plain);
-    
+    mtx_init(&ectx.out_mtx, mtx_plain);
+    mtx_init(&ectx.stats_mtx, mtx_plain);
+
     reducer_worker_ctx_t wctx;
     memset(&wctx, 0, sizeof(wctx));
     wctx.mr = mr;
@@ -325,13 +514,55 @@ static void reducer_process_main(struct mr *mr, int pipe_in, int pipe_out) {
     wctx.groups_count = gc;
     wctx.next_group = 0;
     mtx_init(&wctx.next_group_mtx, mtx_plain);
-    
-    thrd_t *ws = malloc(sizeof(thrd_t)*mr->attr.reducer_threads);
-    for (size_t i=0; i<mr->attr.reducer_threads; i++) thrd_create(&ws[i], reducer_worker_main, &wctx);
-    for (size_t i=0; i<mr->attr.reducer_threads; i++) thrd_join(ws[i], NULL);
-    for (size_t i=0; i<gc; i++) free(gs[i].values);
-    for (size_t i=0; i<rctx.pairs_count; i++) { free(rctx.pairs[i].token); free(rctx.pairs[i].value); }
-    free(rctx.pairs); free(gs); free(ws); close(pipe_out);
+
+    thrd_t *ws = malloc(sizeof(thrd_t) * mr->attr.reducer_threads);
+    if (!ws) {
+        MR_LOG(mr, "ERROR", "reducer_process_main: malloc ws failed");
+        for (size_t i = 0; i < gc; i++) {
+            free(gs[i].values);
+        }
+        free(gs);
+        for (size_t i = 0; i < rctx.pairs_count; i++) {
+            free(rctx.pairs[i].token);
+            free(rctx.pairs[i].value);
+        }
+        free(rctx.pairs);
+        mtx_destroy(&ectx.out_mtx);
+        mtx_destroy(&ectx.stats_mtx);
+        mtx_destroy(&wctx.next_group_mtx);
+        close(pipe_out);
+        return;
+    }
+
+    size_t workers_created = 0;
+    for (size_t i = 0; i < mr->attr.reducer_threads; i++) {
+        if (thrd_create(&ws[i], reducer_worker_main, &wctx) == thrd_success) {
+            workers_created++;
+        } else {
+            MR_LOG(mr, "ERROR", "reducer_process_main: thrd_create worker failed");
+        }
+    }
+
+    for (size_t i = 0; i < workers_created; i++) {
+        thrd_join(ws[i], NULL);
+    }
+
+    for (size_t i = 0; i < gc; i++) {
+        free(gs[i].values);
+    }
+    for (size_t i = 0; i < rctx.pairs_count; i++) {
+        free(rctx.pairs[i].token);
+        free(rctx.pairs[i].value);
+    }
+
+    mtx_destroy(&ectx.out_mtx);
+    mtx_destroy(&ectx.stats_mtx);
+    mtx_destroy(&wctx.next_group_mtx);
+
+    free(rctx.pairs);
+    free(gs);
+    free(ws);
+    close(pipe_out);
 }
 
 static int process_single_file(mr_t mr, const char *path) {

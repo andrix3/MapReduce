@@ -28,8 +28,13 @@ void mr_log_internal(const char *p, const char *e, const char *m, const char *f,
     if (fd>=0) {
         struct flock fl = { .l_type = F_WRLCK, .l_whence = SEEK_SET };
         fcntl(fd, F_SETLKW, &fl);
-        ssize_t nw = write(fd, buf, write_len);
-        (void)nw;
+        const char *p_buf = buf;
+        while (write_len > 0) {
+            ssize_t written = write(fd, p_buf, write_len);
+            if (written < 0) break;
+            p_buf += written;
+            write_len -= (size_t)written;
+        }
         fl.l_type = F_UNLCK; fcntl(fd, F_SETLKW, &fl);
         close(fd);
     }
