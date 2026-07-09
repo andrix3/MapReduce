@@ -1,6 +1,7 @@
 # Variabili di compilazione
 CC = gcc
-CFLAGS = -Wall -Wextra -Wpedantic -std=c11 -D_DEFAULT_SOURCE -pthread
+# Aggiunto -Werror per trattare i warning come errori (Refactoring Sicurezza)
+CFLAGS = -Wall -Wextra -Werror -Wpedantic -std=c11 -D_DEFAULT_SOURCE -pthread
 INCLUDES = -Iinclude -Isrc/utils
 LIBS = -lpthread 
 
