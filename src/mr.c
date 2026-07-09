@@ -95,12 +95,26 @@ int mr_start(mr_t mr, const char *input_path, const char *output_path) {
     if (pipe(p2) == -1) { close(p1[0]); close(p1[1]); return -1; }
     if (pipe(p3) == -1) { close(p1[0]); close(p1[1]); close(p2[0]); close(p2[1]); return -1; }
 
-    if ((mr->mapper_pid = fork()) == 0) {
+    if ((mr->mapper_pid = fork()) == -1) {
+        close(p1[0]); close(p1[1]);
+        close(p2[0]); close(p2[1]);
+        close(p3[0]); close(p3[1]);
+        return -1;
+    }
+    if (mr->mapper_pid == 0) {
         dup2(p1[0], STDIN_FILENO); dup2(p2[1], STDOUT_FILENO);
         close(p1[0]); close(p1[1]); close(p2[0]); close(p2[1]); close(p3[0]); close(p3[1]);
         mapper_process_main(mr, STDIN_FILENO, STDOUT_FILENO); _exit(0);
     }
-    if ((mr->reducer_pid = fork()) == 0) {
+    if ((mr->reducer_pid = fork()) == -1) {
+        close(p1[0]); close(p1[1]);
+        close(p2[0]); close(p2[1]);
+        close(p3[0]); close(p3[1]);
+        kill(mr->mapper_pid, SIGKILL);
+        waitpid(mr->mapper_pid, NULL, 0);
+        return -1;
+    }
+    if (mr->reducer_pid == 0) {
         dup2(p2[0], STDIN_FILENO); dup2(p3[1], STDOUT_FILENO);
         close(p1[0]); close(p1[1]); close(p2[0]); close(p2[1]); close(p3[0]); close(p3[1]);
         reducer_process_main(mr, STDIN_FILENO, STDOUT_FILENO); _exit(0);
@@ -112,18 +126,25 @@ int mr_start(mr_t mr, const char *input_path, const char *output_path) {
     close(mr->main_to_mapper_write); mr->main_to_mapper_write = -1;
 
     out_entry_t *outs = NULL; size_t o_cnt = 0, o_cap = 0;
+    int run_status = 0;
     while (1) {
         int tl = 0, rl = 0;
         ssize_t bytes_read = readn(mr->reducer_to_main_read, &tl, sizeof(int));
-        if (bytes_read <= 0) break;
-        if (readn(mr->reducer_to_main_read, &rl, sizeof(int)) != (ssize_t)sizeof(int)) break;
-        if (tl < 0 || tl > MAX_PATH_LEN || rl < 0 || rl > MAX_LINE_LEN) goto err_out;
+        if (bytes_read < 0) { run_status = -1; goto err_out; }
+        if (bytes_read == 0) break;
+        if (readn(mr->reducer_to_main_read, &rl, sizeof(int)) != (ssize_t)sizeof(int)) { run_status = -1; goto err_out; }
+        if (tl < 0 || tl > MAX_PATH_LEN || rl < 0 || rl > MAX_LINE_LEN) { run_status = -1; goto err_out; }
         char *tok = malloc((size_t)(tl + 1)); void *res = rl > 0 ? malloc((size_t)rl) : NULL;
-        if (tok == NULL || (rl > 0 && res == NULL)) { free(tok); free(res); goto err_out; }
-        if (readn(mr->reducer_to_main_read, tok, (size_t)tl) != (ssize_t)tl) { free(tok); free(res); goto err_out; }
+        if (tok == NULL || (rl > 0 && res == NULL)) { free(tok); free(res); run_status = -1; goto err_out; }
+        if (readn(mr->reducer_to_main_read, tok, (size_t)tl) != (ssize_t)tl) { free(tok); free(res); run_status = -1; goto err_out; }
         tok[tl] = '\0';
-        if (rl > 0 && readn(mr->reducer_to_main_read, res, (size_t)rl) != (ssize_t)rl) { free(tok); free(res); goto err_out; }
-        if (o_cnt == o_cap) { o_cap = o_cap ? o_cap*2 : 64; outs = realloc(outs, o_cap*sizeof(out_entry_t)); }
+        if (rl > 0 && readn(mr->reducer_to_main_read, res, (size_t)rl) != (ssize_t)rl) { free(tok); free(res); run_status = -1; goto err_out; }
+        if (o_cnt == o_cap) {
+            o_cap = o_cap ? o_cap*2 : 64;
+            out_entry_t *new_outs = realloc(outs, o_cap*sizeof(out_entry_t));
+            if (!new_outs) { free(tok); free(res); run_status = -1; goto err_out; }
+            outs = new_outs;
+        }
         outs[o_cnt++] = (out_entry_t){tok, tl, res, rl};
     }
     close(mr->reducer_to_main_read); mr->reducer_to_main_read = -1;
@@ -139,11 +160,15 @@ int mr_start(mr_t mr, const char *input_path, const char *output_path) {
             }
         }
         fclose(f);
+    } else {
+        run_status = -1;
     }
 err_out:
     for (size_t i=0; i<o_cnt; i++) { free(outs[i].token); free(outs[i].result); }
-    free(outs); waitpid(mr->mapper_pid, NULL, 0); waitpid(mr->reducer_pid, NULL, 0);
-    return status;
+    free(outs);
+    if (mr->reducer_to_main_read != -1) { close(mr->reducer_to_main_read); mr->reducer_to_main_read = -1; }
+    waitpid(mr->mapper_pid, NULL, 0); waitpid(mr->reducer_pid, NULL, 0);
+    return (status == -1 || run_status == -1) ? -1 : 0;
 }
 
 int mr_destroy(mr_t mr) {

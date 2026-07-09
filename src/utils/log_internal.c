@@ -18,12 +18,17 @@ void mr_log_internal(const char *p, const char *e, const char *m, const char *f,
     struct timespec ts; timespec_get(&ts, TIME_UTC);
     char t_buf[64]; strftime(t_buf, 64, "%Y-%m-%d %H:%M:%S", localtime(&ts.tv_sec));
     char buf[1024]; int len = snprintf(buf, 1024, "[%s.%03ld] [%d] [%s] %s\n", t_buf, ts.tv_nsec/1000000, getpid(), e, m);
+    if (len < 0) return;
+    size_t write_len = (size_t)len;
+    if (write_len >= 1024) {
+        write_len = 1023;
+    }
     mtx_lock(&l_mtx);
     int fd = open(p, O_CREAT|O_WRONLY|O_APPEND, 0666);
     if (fd>=0) {
         struct flock fl = { .l_type = F_WRLCK, .l_whence = SEEK_SET };
         fcntl(fd, F_SETLKW, &fl);
-        ssize_t nw = write(fd, buf, (size_t)len);
+        ssize_t nw = write(fd, buf, write_len);
         (void)nw;
         fl.l_type = F_UNLCK; fcntl(fd, F_SETLKW, &fl);
         close(fd);
