@@ -17,11 +17,11 @@ void mr_log_internal(const char *p, const char *e, const char *m, const char *f,
     call_once(&l_once, l_init);
     struct timespec ts; timespec_get(&ts, TIME_UTC);
     char t_buf[64]; strftime(t_buf, 64, "%Y-%m-%d %H:%M:%S", localtime(&ts.tv_sec));
-    char buf[1024]; int len = snprintf(buf, 1024, "[%s.%03ld] [%d] [%s] %s\n", t_buf, ts.tv_nsec/1000000, getpid(), e, m);
+    char buf[1024]; int len = snprintf(buf, sizeof(buf), "[%s.%03ld] [%d] [%s] %s\n", t_buf, ts.tv_nsec/1000000, getpid(), e, m);
     if (len < 0) return;
     size_t write_len = (size_t)len;
-    if (write_len >= 1024) {
-        write_len = 1023;
+    if (write_len >= sizeof(buf)) {
+        write_len = sizeof(buf) - 1;
     }
     mtx_lock(&l_mtx);
     int fd = open(p, O_CREAT|O_WRONLY|O_APPEND, 0666);

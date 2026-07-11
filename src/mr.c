@@ -90,29 +90,22 @@ int mr_start(mr_t mr, const char *input_path, const char *output_path) {
     path_type_t in_type = check_path(input_path);
     if (in_type == PATH_INVALID || check_output_path(output_path) == -1) return -1;
 
-    int p1[2], p2[2], p3[2];
-    if (pipe(p1) == -1) return -1;
-    if (pipe(p2) == -1) { close(p1[0]); close(p1[1]); return -1; }
-    if (pipe(p3) == -1) { close(p1[0]); close(p1[1]); close(p2[0]); close(p2[1]); return -1; }
+    int p1[2] = {-1, -1}, p2[2] = {-1, -1}, p3[2] = {-1, -1};
+    if (pipe(p1) == -1) goto pipe_fork_err;
+    if (pipe(p2) == -1) goto pipe_fork_err;
+    if (pipe(p3) == -1) goto pipe_fork_err;
 
-    if ((mr->mapper_pid = fork()) == -1) {
-        close(p1[0]); close(p1[1]);
-        close(p2[0]); close(p2[1]);
-        close(p3[0]); close(p3[1]);
-        return -1;
-    }
+    if ((mr->mapper_pid = fork()) == -1) goto pipe_fork_err;
     if (mr->mapper_pid == 0) {
         dup2(p1[0], STDIN_FILENO); dup2(p2[1], STDOUT_FILENO);
         close(p1[0]); close(p1[1]); close(p2[0]); close(p2[1]); close(p3[0]); close(p3[1]);
         mapper_process_main(mr, STDIN_FILENO, STDOUT_FILENO); _exit(0);
     }
     if ((mr->reducer_pid = fork()) == -1) {
-        close(p1[0]); close(p1[1]);
-        close(p2[0]); close(p2[1]);
-        close(p3[0]); close(p3[1]);
         kill(mr->mapper_pid, SIGKILL);
         waitpid(mr->mapper_pid, NULL, 0);
-        return -1;
+        mr->mapper_pid = -1;
+        goto pipe_fork_err;
     }
     if (mr->reducer_pid == 0) {
         dup2(p2[0], STDIN_FILENO); dup2(p3[1], STDOUT_FILENO);
@@ -133,7 +126,7 @@ int mr_start(mr_t mr, const char *input_path, const char *output_path) {
         if (bytes_read < 0) { run_status = -1; goto err_out; }
         if (bytes_read == 0) break;
         if (readn(mr->reducer_to_main_read, &rl, sizeof(int)) != (ssize_t)sizeof(int)) { run_status = -1; goto err_out; }
-        if (tl < 0 || tl > MAX_PATH_LEN || rl < 0 || rl > MAX_LINE_LEN) { run_status = -1; goto err_out; }
+        if (tl <= 0 || tl > MAX_PATH_LEN || rl < 0 || rl > MAX_LINE_LEN) { run_status = -1; goto err_out; }
         char *tok = malloc((size_t)(tl + 1)); void *res = rl > 0 ? malloc((size_t)rl) : NULL;
         if (tok == NULL || (rl > 0 && res == NULL)) { free(tok); free(res); run_status = -1; goto err_out; }
         if (readn(mr->reducer_to_main_read, tok, (size_t)tl) != (ssize_t)tl) { free(tok); free(res); run_status = -1; goto err_out; }
@@ -169,6 +162,12 @@ err_out:
     if (mr->reducer_to_main_read != -1) { close(mr->reducer_to_main_read); mr->reducer_to_main_read = -1; }
     waitpid(mr->mapper_pid, NULL, 0); waitpid(mr->reducer_pid, NULL, 0);
     return (status == -1 || run_status == -1) ? -1 : 0;
+
+pipe_fork_err:
+    if (p1[0] != -1) { close(p1[0]); close(p1[1]); }
+    if (p2[0] != -1) { close(p2[0]); close(p2[1]); }
+    if (p3[0] != -1) { close(p3[0]); close(p3[1]); }
+    return -1;
 }
 
 int mr_destroy(mr_t mr) {
@@ -196,94 +195,83 @@ static int mapper_emit(const char *token, const void *value, size_t value_size, 
 
 static int reader_main(void *arg) {
     mapper_ctx_t *ctx = (mapper_ctx_t *)arg;
-    const int MAX_PATH_LIMIT = 4096;
-    const int MAX_LINE_LIMIT = 10 * 1024 * 1024; // 10MB
-    int read_error = 0;
-
+    const int MAX_PATH = 4096;
+    const int MAX_LINE = 10 * 1024 * 1024; // 10MB limite massimo riga
     MR_LOG(ctx->mr, "INFO", "Mapper reader thread started");
+    
     while(1) {
         int path_len_int = 0;
         ssize_t n = readn(ctx->pipe_in, &path_len_int, sizeof(int));
-        if (n == 0) break; // EOF
+        if (n == 0) break; // EOF pulito
         if (n < 0) {
-            MR_LOG(ctx->mr, "ERROR", "Mapper reader: error reading path_len");
-            read_error = 1;
-            break;
+            MR_LOG(ctx->mr, "ERROR", "Mapper reader: errore lettura path_len");
+            goto error_cleanup;
         }
-
-        // Convalida della lunghezza del percorso (Prevenzione Buffer Overflow)
-        if (path_len_int < 0 || path_len_int > MAX_PATH_LIMIT) {
+        
+        // Controllo di Sicurezza Rigoroso (Sezione 10)
+        if (path_len_int <= 0 || path_len_int > MAX_PATH) {
             MR_LOG(ctx->mr, "ERROR", "Mapper reader: path_len non valido o eccessivo");
-            read_error = 1;
-            break;
+            goto error_cleanup;
         }
-
+        
         char *path = malloc((size_t)path_len_int + 1);
-        if (path == NULL) {
+        if (!path) {
             MR_LOG(ctx->mr, "ERROR", "Mapper reader: malloc path fallita");
-            read_error = 1;
-            break;
+            goto error_cleanup;
         }
-
+        
         if (readn(ctx->pipe_in, path, path_len_int) != path_len_int) {
-            MR_LOG(ctx->mr, "ERROR", "Mapper reader: error reading path content");
+            MR_LOG(ctx->mr, "ERROR", "Mapper reader: errore lettura percorso file");
             free(path);
-            read_error = 1;
-            break;
+            goto error_cleanup;
         }
         path[path_len_int] = '\0';
-
+        
         int line_num_int = 0;
         if (readn(ctx->pipe_in, &line_num_int, sizeof(int)) != sizeof(int)) {
-            MR_LOG(ctx->mr, "ERROR", "Mapper reader: error reading line_num");
+            MR_LOG(ctx->mr, "ERROR", "Mapper reader: errore lettura line_num");
             free(path);
-            read_error = 1;
-            break;
+            goto error_cleanup;
         }
-
+        
         int line_len_int = 0;
         if (readn(ctx->pipe_in, &line_len_int, sizeof(int)) != sizeof(int)) {
-            MR_LOG(ctx->mr, "ERROR", "Mapper reader: error reading line_len");
+            MR_LOG(ctx->mr, "ERROR", "Mapper reader: errore lettura line_len");
             free(path);
-            read_error = 1;
-            break;
+            goto error_cleanup;
         }
-
-        // Convalida della lunghezza della riga (Prevenzione Buffer Overflow)
-        if (line_len_int < 0 || line_len_int > MAX_LINE_LIMIT) {
+        
+        // Controllo di Sicurezza Rigoroso (Sezione 10)
+        if (line_len_int < 0 || line_len_int > MAX_LINE) {
             MR_LOG(ctx->mr, "ERROR", "Mapper reader: line_len non valido o eccessivo");
             free(path);
-            read_error = 1;
-            break;
+            goto error_cleanup;
         }
-
+        
         char *line = malloc((size_t)line_len_int + 1);
-        if (line == NULL) {
+        if (!line) {
             MR_LOG(ctx->mr, "ERROR", "Mapper reader: malloc line fallita");
             free(path);
-            read_error = 1;
-            break;
+            goto error_cleanup;
         }
-
+        
         if (line_len_int > 0) {
             if (readn(ctx->pipe_in, line, line_len_int) != line_len_int) {
-                MR_LOG(ctx->mr, "ERROR", "Mapper reader: error reading line content");
+                MR_LOG(ctx->mr, "ERROR", "Mapper reader: errore lettura contenuto riga");
                 free(path);
                 free(line);
-                read_error = 1;
-                break;
+                goto error_cleanup;
             }
         }
         line[line_len_int] = '\0';
-
+        
         internal_line_t iline;
         iline.file_name = path;
-        iline.file_name_len = path_len_int;
+        iline.file_name_len = (size_t)path_len_int;
         iline.line_number = (unsigned long)line_num_int;
         iline.line = line;
         iline.line_len = (size_t)line_len_int;
-
-        // Inserimento bloccante in coda
+        
         mtx_lock(&ctx->queue.mtx);
         while(ctx->queue.size == ctx->queue.max_size) {
             cnd_wait(&ctx->queue.not_full, &ctx->queue.mtx);
@@ -293,20 +281,25 @@ static int reader_main(void *arg) {
         ctx->queue.size++;
         cnd_signal(&ctx->queue.not_empty);
         mtx_unlock(&ctx->queue.mtx);
-
+        
         mtx_lock(&ctx->stats_mtx);
         ctx->lines_read++;
         mtx_unlock(&ctx->stats_mtx);
     }
-
-    // Risveglio e sblocco garantito di tutti i thread worker (Prevenzione Deadlock)
+    
     mtx_lock(&ctx->queue.mtx);
     ctx->queue.eof = 1;
     cnd_broadcast(&ctx->queue.not_empty);
     mtx_unlock(&ctx->queue.mtx);
-
     MR_LOG(ctx->mr, "INFO", "Mapper reader thread ended");
-    return read_error ? -1 : 0;
+    return 0;
+
+error_cleanup:
+    mtx_lock(&ctx->queue.mtx);
+    ctx->queue.eof = 1;
+    cnd_broadcast(&ctx->queue.not_empty); // Sblocco obbligatorio dei worker per evitare deadlock
+    mtx_unlock(&ctx->queue.mtx);
+    return -1;
 }
 
 static int mapper_worker_main(void *arg) {
@@ -397,7 +390,7 @@ static int reducer_reader_main(void *arg) {
         mr_pair_header_t h;
         ssize_t bytes_read = readn(ctx->pipe_in, &h, sizeof(h));
         if (bytes_read <= 0) break;
-        if (h.token_len < 0 || h.token_len > MAX_PATH_LEN || h.value_len < 0 || h.value_len > MAX_VALUE_LEN) break;
+        if (h.token_len <= 0 || h.token_len > MAX_PATH_LEN || h.value_len < 0 || h.value_len > MAX_VALUE_LEN) break;
         char *tok = malloc((size_t)(h.token_len + 1));
         if (!tok) break;
         if (readn(ctx->pipe_in, tok, (size_t)h.token_len) != (ssize_t)h.token_len) { free(tok); break; }
