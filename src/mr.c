@@ -134,7 +134,7 @@ int mr_start(mr_t mr, const char *input_path, const char *output_path) {
         if (bytes_read < 0) { run_status = -1; goto err_out; }
         if (bytes_read == 0) break;
         if (readn(mr->reducer_to_main_read, &rl, sizeof(int)) != (ssize_t)sizeof(int)) { run_status = -1; goto err_out; }
-        if (tl <= 0 || tl > MAX_PATH_LEN || rl < 0 || rl > MAX_LINE_LEN) { run_status = -1; goto err_out; }
+        if (tl < 0 || tl > MAX_PATH_LEN || rl < 0 || rl > MAX_LINE_LEN) { run_status = -1; goto err_out; }
         char *tok = malloc((size_t)(tl + 1)); void *res = rl > 0 ? malloc((size_t)rl) : NULL;
         if (tok == NULL || (rl > 0 && res == NULL)) { free(tok); free(res); run_status = -1; goto err_out; }
         if (readn(mr->reducer_to_main_read, tok, (size_t)tl) != (ssize_t)tl) { free(tok); free(res); run_status = -1; goto err_out; }
@@ -411,7 +411,7 @@ static int reducer_reader_main(void *arg) {
         mr_pair_header_t h;
         ssize_t bytes_read = readn(ctx->pipe_in, &h, sizeof(h));
         if (bytes_read <= 0) break;
-        if (h.token_len <= 0 || h.token_len > MAX_PATH_LEN || h.value_len < 0 || h.value_len > MAX_VALUE_LEN) break;
+        if (h.token_len < 0 || h.token_len > MAX_PATH_LEN || h.value_len < 0 || h.value_len > MAX_VALUE_LEN) break;
         char *tok = malloc((size_t)(h.token_len + 1));
         if (!tok) break;
         if (readn(ctx->pipe_in, tok, (size_t)h.token_len) != (ssize_t)h.token_len) { free(tok); break; }
