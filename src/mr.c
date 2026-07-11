@@ -90,10 +90,12 @@ int mr_start(mr_t mr, const char *input_path, const char *output_path) {
     path_type_t in_type = check_path(input_path);
     if (in_type == PATH_INVALID || check_output_path(output_path) == -1) return -1;
 
+    char msg_buf[256];
     int p1[2] = {-1, -1}, p2[2] = {-1, -1}, p3[2] = {-1, -1};
     if (pipe(p1) == -1) goto pipe_fork_err;
     if (pipe(p2) == -1) goto pipe_fork_err;
     if (pipe(p3) == -1) goto pipe_fork_err;
+    MR_LOG(mr, "INFO", "Pipes created successfully");
 
     if ((mr->mapper_pid = fork()) == -1) goto pipe_fork_err;
     if (mr->mapper_pid == 0) {
@@ -101,6 +103,9 @@ int mr_start(mr_t mr, const char *input_path, const char *output_path) {
         close(p1[0]); close(p1[1]); close(p2[0]); close(p2[1]); close(p3[0]); close(p3[1]);
         mapper_process_main(mr, STDIN_FILENO, STDOUT_FILENO); _exit(0);
     }
+    snprintf(msg_buf, sizeof(msg_buf), "Forked Mapper process with PID %d", mr->mapper_pid);
+    MR_LOG(mr, "INFO", msg_buf);
+
     if ((mr->reducer_pid = fork()) == -1) {
         kill(mr->mapper_pid, SIGKILL);
         waitpid(mr->mapper_pid, NULL, 0);
@@ -112,6 +117,9 @@ int mr_start(mr_t mr, const char *input_path, const char *output_path) {
         close(p1[0]); close(p1[1]); close(p2[0]); close(p2[1]); close(p3[0]); close(p3[1]);
         reducer_process_main(mr, STDIN_FILENO, STDOUT_FILENO); _exit(0);
     }
+    snprintf(msg_buf, sizeof(msg_buf), "Forked Reducer process with PID %d", mr->reducer_pid);
+    MR_LOG(mr, "INFO", msg_buf);
+
     close(p1[0]); close(p2[0]); close(p2[1]); close(p3[1]);
     mr->main_to_mapper_write = p1[1]; mr->reducer_to_main_read = p3[0];
 
@@ -142,6 +150,8 @@ int mr_start(mr_t mr, const char *input_path, const char *output_path) {
     }
     close(mr->reducer_to_main_read); mr->reducer_to_main_read = -1;
     if (o_cnt > 1) qsort(outs, o_cnt, sizeof(out_entry_t), out_cmp);
+
+    MR_LOG(mr, "INFO", "Opening output file");
     FILE *f = fopen(output_path, "wb");
     if (f) {
         for (size_t i=0; i<o_cnt; i++) {
@@ -153,7 +163,11 @@ int mr_start(mr_t mr, const char *input_path, const char *output_path) {
             }
         }
         fclose(f);
+        MR_LOG(mr, "INFO", "Closed output file");
+        snprintf(msg_buf, sizeof(msg_buf), "Output written. Results: %zu", o_cnt);
+        MR_LOG(mr, "INFO", msg_buf);
     } else {
+        MR_LOG(mr, "ERROR", "Failed to open output file");
         run_status = -1;
     }
 err_out:
@@ -304,6 +318,7 @@ error_cleanup:
 
 static int mapper_worker_main(void *arg) {
     mapper_ctx_t *ctx = (mapper_ctx_t *)arg;
+    MR_LOG(ctx->mr, "INFO", "Mapper worker thread started");
     while (1) {
         mtx_lock(&ctx->queue.mtx);
         while (ctx->queue.size == 0 && !ctx->queue.eof) cnd_wait(&ctx->queue.not_empty, &ctx->queue.mtx);
@@ -315,6 +330,7 @@ static int mapper_worker_main(void *arg) {
         ctx->mr->user_mapper(&ml, mapper_emit, ctx, ctx->mr->user_arg);
         free(il.file_name); free(il.line);
     }
+    MR_LOG(ctx->mr, "INFO", "Mapper worker thread ended");
     return 0;
 }
 
@@ -368,6 +384,10 @@ static void mapper_process_main(struct mr *mr, int pipe_in, int pipe_out) {
         thrd_join(ws[i], NULL);
     }
 
+    char msg_buf[256];
+    snprintf(msg_buf, sizeof(msg_buf), "Mapper finished. Lines read: %zu, Pairs produced: %zu", ctx.lines_read, ctx.pairs_produced);
+    MR_LOG(mr, "INFO", msg_buf);
+
     for (size_t i = ctx.queue.head; ctx.queue.size > 0; i = (i + 1) % ctx.queue.max_size) {
         free(ctx.queue.buffer[i].file_name);
         free(ctx.queue.buffer[i].line);
@@ -386,6 +406,7 @@ static void mapper_process_main(struct mr *mr, int pipe_in, int pipe_out) {
 
 static int reducer_reader_main(void *arg) {
     reducer_reader_ctx_t *ctx = (reducer_reader_ctx_t *)arg;
+    MR_LOG(ctx->mr, "INFO", "Reducer reader thread started");
     while (1) {
         mr_pair_header_t h;
         ssize_t bytes_read = readn(ctx->pipe_in, &h, sizeof(h));
@@ -408,11 +429,13 @@ static int reducer_reader_main(void *arg) {
         }
         ctx->pairs[ctx->pairs_count++] = (pair_entry_t){tok, h.token_len, val, h.value_len};
     }
+    MR_LOG(ctx->mr, "INFO", "Reducer reader thread ended");
     return 0;
 }
 
 static int reducer_worker_main(void *arg) {
     reducer_worker_ctx_t *ctx = (reducer_worker_ctx_t *)arg;
+    MR_LOG(ctx->mr, "INFO", "Reducer worker thread started");
     while (1) {
         size_t idx; mtx_lock(&ctx->next_group_mtx);
         if (ctx->next_group >= ctx->groups_count) { mtx_unlock(&ctx->next_group_mtx); break; }
@@ -420,6 +443,7 @@ static int reducer_worker_main(void *arg) {
         reduce_group_t *g = &ctx->groups[idx];
         ctx->mr->user_reducer(g->token, g->values, g->values_count, reducer_emit_top, ctx->emit_ctx, ctx->mr->user_arg);
     }
+    MR_LOG(ctx->mr, "INFO", "Reducer worker thread ended");
     return 0;
 }
 
@@ -540,6 +564,10 @@ static void reducer_process_main(struct mr *mr, int pipe_in, int pipe_out) {
         thrd_join(ws[i], NULL);
     }
 
+    char msg_buf[256];
+    snprintf(msg_buf, sizeof(msg_buf), "Reducer finished. Pairs read: %zu, Unique tokens: %zu, Results emitted: %zu", rctx.pairs_count, gc, ectx.results_emitted);
+    MR_LOG(mr, "INFO", msg_buf);
+
     for (size_t i = 0; i < gc; i++) {
         free(gs[i].values);
     }
@@ -559,7 +587,17 @@ static void reducer_process_main(struct mr *mr, int pipe_in, int pipe_out) {
 }
 
 static int process_single_file(mr_t mr, const char *path) {
-    FILE *f = fopen(path, "r"); if (!f) return -1;
+    char msg_buf[256];
+    snprintf(msg_buf, sizeof(msg_buf), "Opening input file: %s", path);
+    MR_LOG(mr, "INFO", msg_buf);
+
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        snprintf(msg_buf, sizeof(msg_buf), "Failed to open input file: %s", path);
+        MR_LOG(mr, "ERROR", msg_buf);
+        return -1;
+    }
+
     char *l = NULL; size_t len = 0; ssize_t nr; int pl = (int)strlen(path), ln = 1;
     int status = 0;
     while ((nr = getline(&l, &len, f)) != -1) {
@@ -575,17 +613,23 @@ static int process_single_file(mr_t mr, const char *path) {
         }
         ln++;
     }
-    free(l); fclose(f); return status;
+    free(l);
+    fclose(f);
+    snprintf(msg_buf, sizeof(msg_buf), "Closed input file: %s", path);
+    MR_LOG(mr, "INFO", msg_buf);
+    return status;
 }
 
 static int process_multiple_files(mr_t mr, const char *path) {
     struct dirent **nl; int n = scandir(path, &nl, NULL, alphasort); if (n<0) return -1;
     int status = 0;
     for (int i=0; i<n; i++) {
-        if (status == 0 && nl[i]->d_type == DT_REG) {
+        if (status == 0) {
             char fp[4096];
             snprintf(fp, 4096, "%s/%s", path, nl[i]->d_name);
-            if (process_single_file(mr, fp) == -1) status = -1;
+            if (check_path(fp) == PATH_FILE) {
+                if (process_single_file(mr, fp) == -1) status = -1;
+            }
         }
         free(nl[i]);
     }
