@@ -5,7 +5,6 @@
 #include <unistd.h>
 #include "mr.h"
 
-// Helper struct for verification
 typedef struct {
     char token[256];
     int val;
@@ -36,7 +35,6 @@ static int read_mro(const char *path, test_result_t *out, size_t max_results, si
     return 0;
 }
 
-// User callbacks for counting occurrences of each line content
 static int map_line_content(const mr_file_line_t *l, mr_emit_pair_t e, void *a, void *u) {
     (void)u;
     int v = 1;
@@ -54,7 +52,6 @@ static int reduce_sum(const char *t, const mr_value_t *vs, size_t vc, mr_emit_re
     return 0;
 }
 
-// Map/Reduce for simple counting
 static int map_emit_ones(const mr_file_line_t *l, mr_emit_pair_t e, void *a, void *u) {
     (void)l; (void)u;
     int v = 1;
@@ -62,7 +59,6 @@ static int map_emit_ones(const mr_file_line_t *l, mr_emit_pair_t e, void *a, voi
     return 0;
 }
 
-// Map/Reduce for line length
 static int map_line_len(const mr_file_line_t *l, mr_emit_pair_t e, void *a, void *u) {
     (void)u;
     int len = (int)l->line_len;
@@ -81,13 +77,12 @@ static int reduce_max_len(const char *t, const mr_value_t *vs, size_t vc, mr_emi
     return 0;
 }
 
-// --- Professor's Special Requirements Tests ---
 
 // === Caso Limite 1: Gestione di File Vuoti (0 byte) ===
 // Verifica che il framework completi con successo l'esecuzione senza
 // bloccarsi o andare in crash quando riceve in input un file vuoto.
 static void test_empty_file() {
-    printf("Running test: Empty Input File (0 bytes)...\n");
+    printf("Esecuzione test: File di input vuoto (0 byte)...\n");
     system("touch test_empty.txt");
     mr_t mr;
     mr_attr_t at;
@@ -106,14 +101,14 @@ static void test_empty_file() {
     fclose(f);
 
     system("rm -f test_empty.txt out_empty.mro");
-    printf("Test: Empty Input File passed.\n\n");
+    printf("Test: File di input vuoto superato.\n\n");
 }
 
 // === Caso Limite 2: File contenenti una sola riga (con newline) ===
 // Verifica la corretta elaborazione, deserializzazione e scrittura
 // dei record quando l'input è composto da una sola linea di testo.
 static void test_single_line_file() {
-    printf("Running test: Single Line File (with newline)...\n");
+    printf("Esecuzione test: File a riga singola (con newline)...\n");
     FILE *f = fopen("test_single.txt", "w");
     assert(f != NULL);
     fprintf(f, "single_line\n");
@@ -135,7 +130,7 @@ static void test_single_line_file() {
     assert(res[0].val == 1);
 
     system("rm -f test_single.txt out_single.mro");
-    printf("Test: Single Line File passed.\n\n");
+    printf("Test: File a riga singola superato.\n\n");
 }
 
 // === Caso Limite 3: Righe vuote e Ultima riga non terminata da \\n ===
@@ -143,7 +138,7 @@ static void test_single_line_file() {
 // e che l'ultima riga del file, anche se priva di newline finale prima di EOF,
 // venga completamente acquisita e processata dal framework.
 static void test_empty_lines_and_no_newline_eof() {
-    printf("Running test: Empty lines & Last line with no newline at EOF...\n");
+    printf("Esecuzione test: Righe vuote e ultima riga senza newline a EOF...\n");
     FILE *f = fopen("test_specials.txt", "w");
     assert(f != NULL);
     // Scrive:
@@ -181,7 +176,7 @@ static void test_empty_lines_and_no_newline_eof() {
     assert(res[3].val == 1);
 
     system("rm -f test_specials.txt out_specials.mro");
-    printf("Test: Empty lines and EOF without newline passed.\n\n");
+    printf("Test: Righe vuote ed EOF senza newline superato.\n\n");
 }
 
 // --- Altri Casi Limite ---
@@ -190,7 +185,7 @@ static void test_empty_lines_and_no_newline_eof() {
 // Verifica che i buffer dinamici e il protocollo di serializzazione
 // gestiscano linee di grandi dimensioni senza overflow o corruzione di memoria.
 static void test_very_long_line() {
-    printf("Running test: Very Long Line (100KB)...\n");
+    printf("Esecuzione test: Riga molto lunga (100KB)...\n");
     FILE *f = fopen("test_long.txt", "w");
     assert(f != NULL);
     for (int i = 0; i < 100000; i++) {
@@ -215,7 +210,7 @@ static void test_very_long_line() {
     assert(res[0].val == 100000);
 
     system("rm -f test_long.txt out_long.mro");
-    printf("Test: Very Long Line passed.\n\n");
+    printf("Test: Riga molto lunga superato.\n\n");
 }
 
 // === Caso Limite 5: Saturazione della Coda (queue_size = 1) ===
@@ -223,7 +218,7 @@ static void test_very_long_line() {
 // limitata ad 1 solo elemento, costringe i thread Mapper a bloccarsi e sbloccarsi
 // costantemente, validando il comportamento corretto di mutex e condition variables.
 static void test_stress_queue_size_1() {
-    printf("Running test: Stress Test (1000 lines, queue_size=1, multiple threads)...\n");
+    printf("Esecuzione test: Stress Test (1000 righe, queue_size=1, thread multipli)...\n");
     FILE *f = fopen("test_stress.txt", "w");
     assert(f != NULL);
     for (int i = 0; i < 1000; i++) {
@@ -251,7 +246,7 @@ static void test_stress_queue_size_1() {
     assert(res[0].val == 1000);
 
     system("rm -f test_stress.txt out_stress.mro");
-    printf("Test: Stress Test passed.\n\n");
+    printf("Test: Stress Test superato.\n\n");
 }
 
 // === Caso Limite 6: Percorsi Input/Output Non Validi ===
@@ -259,7 +254,7 @@ static void test_stress_queue_size_1() {
 // in presenza di file mancanti o cartelle di destinazione senza permessi di scrittura,
 // assicurando che non ci siano leak di risorse o deadlock.
 static void test_invalid_paths() {
-    printf("Running test: Invalid Input/Output Paths...\n");
+    printf("Esecuzione test: Percorsi di input/output non validi...\n");
     mr_t mr;
     mr_attr_t at;
     mr_attr_init(&at);
@@ -270,7 +265,50 @@ static void test_invalid_paths() {
 
     mr_destroy(mr);
     mr_attr_destroy(&at);
-    printf("Test: Invalid Paths passed.\n\n");
+    printf("Test: Percorsi non validi superato.\n\n");
+}
+
+// === Caso Limite 7: Righe che superano MAX_LINE_LEN ===
+// Verifica che una riga che supera MAX_LINE_LEN venga ignorata
+// e non causi il desync o crash del mapper, mentre le righe successive
+// valide siano correttamente elaborate.
+static void test_exceed_max_line_len() {
+    printf("Esecuzione test: Riga che supera MAX_LINE_LEN (12MB)...\n");
+    FILE *f = fopen("test_huge.txt", "w");
+    assert(f != NULL);
+    
+    // Scrivi 12 MB di 'a'
+    char *buf = malloc(1024 * 1024);
+    assert(buf != NULL);
+    memset(buf, 'a', 1024 * 1024);
+    for (int i = 0; i < 12; i++) {
+        assert(fwrite(buf, 1, 1024 * 1024, f) == 1024 * 1024);
+    }
+    free(buf);
+    fputc('\n', f); // Fine della riga da 12MB
+    
+    // Seconda riga valida
+    fprintf(f, "riga_valida\n");
+    fclose(f);
+
+    mr_t mr;
+    mr_attr_t at;
+    mr_attr_init(&at);
+    assert(mr_create(&mr, &at, map_line_content, reduce_sum, NULL) == 0);
+    assert(mr_start(mr, "test_huge.txt", "out_huge.mro") == 0);
+    mr_destroy(mr);
+    mr_attr_destroy(&at);
+
+    test_result_t res[10];
+    size_t count = 0;
+    assert(read_mro("out_huge.mro", res, 10, &count) == 0);
+    // Deve contenere solo "riga_valida"
+    assert(count == 1);
+    assert(strcmp(res[0].token, "riga_valida") == 0);
+    assert(res[0].val == 1);
+
+    system("rm -f test_huge.txt out_huge.mro");
+    printf("Test: Riga che supera MAX_LINE_LEN superato.\n\n");
 }
 
 int main() {
@@ -281,6 +319,7 @@ int main() {
     test_very_long_line();
     test_stress_queue_size_1();
     test_invalid_paths();
+    test_exceed_max_line_len();
     printf("=== TUTTI I TEST DEI CASI LIMITE COMPLETATI CON SUCCESSO! ===\n");
     return 0;
 }
