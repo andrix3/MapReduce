@@ -53,7 +53,7 @@ make clean    # Pulisce la directory eliminando file oggetto, librerie, log e bi
 ```
 ## Esempio di utilizzo
 Per provare il framework con l'esempio del conteggio parole:
-Genera l'output: `./examples/wordcount examples/input_test output.mro`
-Visualizza l'output binario: `./examples/mr_viewer output.mro`
+Genera l'output: `./examples/wordcount examples/input_test output.mro` 
+Visualizza l'output binario: `./examples/mr_viewer output.mro` 
 ## Relazione
 Per maggiori dettagli sulle scelte implementative, la sincronizzazione dei thread C11 e la gestione della memoria, si faccia riferimento alla relazione in formato PDF allegata al progetto.
