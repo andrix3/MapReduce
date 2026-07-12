@@ -35,7 +35,7 @@ Vengono tracciati eventi come la creazione delle pipe, l'avvio dei processi e de
 ## Struttura del Progetto
 
 - **`include/mr.h`**: L'interfaccia pubblica del framework.
-- **`src/mr.c`**: Implementazione core della logica MapReduce e gestione pipeline.
+- **`src/mr.c`**: Implementazione della logica MapReduce e gestione pipeline.
 - **`src/utils/`**: Utility per l'I/O sicuro (`readn`/`writen`) e gestione del logging interno.
 - **`examples/`**: Esempi pratici, tra cui il `wordcount` e l'utility `mr_viewer` per ispezionare il contenuto dei file binari.
 - **`tests/test_suite.c`**: Batteria di test per collaudare il framework anche nei casi limite.
@@ -52,8 +52,10 @@ make test     # Compila ed esegue automaticamente la suite di test
 make clean    # Pulisce la directory eliminando file oggetto, librerie, log e binari
 ```
 ## Esempio di utilizzo
-Per provare il framework con l'esempio del conteggio parole:
-Genera l'output: `./examples/wordcount examples/input_test output.mro` 
-Visualizza l'output binario: `./examples/mr_viewer output.mro` 
+Per provare il framework con l'esempio del conteggio parole(dopo aver compilato):
+```bash
+./examples/wordcount examples/input_test output.mro   # Per generare output
+./examples/mr_viewer output.mro                       # Per visualizzare output
+``` 
 ## Relazione
 Per maggiori dettagli sulle scelte implementative, la sincronizzazione dei thread C11 e la gestione della memoria, si faccia riferimento alla relazione in formato PDF allegata al progetto.
